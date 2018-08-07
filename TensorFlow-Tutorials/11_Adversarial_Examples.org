@@ -1,0 +1,1035 @@
+#+TITLE: TensorFlow Tutorial #11
+
+* Adversarial Examples
+*** yiddi:
+what introduce here, is some like the autoencoder.
+
+adversarial --- we can make ML Model mis-classified one image to any other
+object by adding some specialized noise, and
+
+#+BEGIN_QUOTE
+the key point is the noised-image is still very clearly to human, but ML model
+will mis-classify it to the object we specified.
+#+END_QUOTE
+
+eg.
+1. we have an image of 'rabbit';
+2. fix the target_cls to 'tiger';
+3. learn the 'specialized' noise adding to 'rabbit' image by cross-entropy;
+4. for human, noised image is still a 'rabbit' image;
+5. for ML model, it's a 'tiger'
+
+but this 'specialized' noise is found image-wise(*one noise for one image*),
+next note will introduce some 'generalize' method to find *one noise for all
+images*
+
+#+BEGIN_QUOTE
+how we use it.
+
+we can use it to in an inverse way --- to build a robust ML model, it will be
+robust to noise, and will not mis-classified the image
+#+END_QUOTE
+
+
+*** how to create 'specialized' noise for one image
+In the previous tutorials, we have used various kinds of Deep Neural Networks
+for classifying images with varying success. In this tutorial we will see a
+simple method for finding so-called *Adversarial* Examples that cause a
+*state-of-the-art neural network* to mis-classify any input image to whatever
+class we choose.
+
+This is done simply by adding a small amount of 'specialized' *noise* to the
+input image. The changes are imperceptible to humans, but it fools the neural
+network.
+
+This builds on the previous tutorials. You should be familiar with neural
+networks in general (e.g. Tutorial #01 and #02), and knowledge of the Inception
+model is also helpful (Tutorial #07).
+
+*** flowchart
+file:images/11_adversarial_examples_flowchart.png
+
+We will use the Inception model from Tutorial #07 and modify / hack the
+TensorFlow graph to *find adversarial examples* that cause the Inception model
+to mis-classify the input images.
+
+In the flow-chart below, an image of Willy Wonka has some noise added and the
+result is used as input to the Inception model.
+
+*** target
+#+BEGIN_QUOTE
+The goal is to find the noise that makes the Inception mis-classify the image to
+our specified target-class, here chosen to be a 'bookcase' (class-number 300).
+#+END_QUOTE
+
+*** why using cross-entropy
+We have also added a new loss or cost-function to the graph, that calculates the
+so-called cross-entropy, which is a measure of:
+
+#+BEGIN_QUOTE
+*how well the Inception model has performed at classifying the noisy image*.
+#+END_QUOTE
+
+Because the Inception model is constructed from many basic mathematical
+operations that have been combined, TensorFlow allows us to easily find the
+gradient of the loss-function using the chain-rule of differentiation.
+
+We use the gradient of the loss-function with regard to the input-image, to
+guide us when searching for the adversarial noise.
+
+#+BEGIN_QUOTE
+*We are looking for noise that increases the classification score (aka. probability) for 'bookcase' rather than the original classification of the input image*.
+#+END_QUOTE
+
+This essentially performs optimization using gradient descent and is implemented
+further below.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from IPython.display import Image, display
+Image('images/11_adversarial_examples_flowchart.png')
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+6 - f2d039ee-6e7d-4224-bb02-9ff3c3b56c04
+:END:
+
+*** Imports
+
+    #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+%matplotlib inline
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import numpy as np
+import os
+​
+# Functions and classes for loading and using the Inception model.
+import inception
+
+    #+END_SRC
+
+    This was developed using Python 3.5.2 (Anaconda) and TensorFlow version:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+tf.__version__
+#+END_SRC
+'0.11.0rc0'
+
+*** Inception Model
+*** Download the Inception model from the internet
+The Inception model is downloaded from the internet. This is the default
+directory where you want to save the data-files. The directory will be created
+if it does not exist.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# inception.data_dir = 'inception/'
+#+END_SRC
+
+Download the data for the Inception model if it doesn't already exist in the
+directory. It is 85 MB.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+inception.maybe_download()
+#+END_SRC
+Downloading Inception v3 Model ...
+Data has apparently already been downloaded and unpacked.
+
+*** Load the Inception Model
+Load the Inception model so it is ready for classifying images.
+
+Note the deprecation warning, which might cause the program to fail in the
+future.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model = inception.Inception()
+#+END_SRC
+
+*** Get Input and Output for the Inception Model
+
+**** input image(which has been resized)
+Get a reference to the input tensor for the Inception model. This tensor is for
+the resized image, that is, the raw bytes for a 299 x 299 image with 3 colour
+channels. We will add noise to the resized image and feed the result back into
+the graph using this as well, so we *make sure that the noise is not processed
+further by the resizing algorithm*.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+resized_image = model.resized_image
+#+END_SRC
+
+**** y_pred
+Get a reference to the output of the softmax-classifier for the Inception model.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+y_pred = model.y_pred
+#+END_SRC
+
+**** logits
+Get a reference to the unscaled output of the softmax-classifier for the
+Inception model. These are often called 'logits'. The logits are necessary
+because we will add a new loss-function to the graph, which requires these
+unscaled outputs.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+y_logits = model.y_logits
+#+END_SRC
+
+*** API of cross-entropy and gradient                 :GRADIENT:CROSSENTROPY:
+In order to find adversarial examples we will need to add a new loss-function to
+the graph for the Inception model. We also need the gradient of this
+loss-function with regard to the input image.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# Set the graph for the Inception model as the default graph,
+# so that all changes inside this with-block are done to that graph.
+with model.graph.as_default():
+    # Add a placeholder variable for the target class-number.
+    # This will be set to e.g. 300 for the 'bookcase' class.
+    pl_cls_target = tf.placeholder(dtype=tf.int32)
+​
+    # Add a new loss-function. This is the cross-entropy.
+    # See Tutorial #01 for an explanation of cross-entropy.
+    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=y_logits, labels=[pl_cls_target])
+​
+    # Get the gradient for the loss-function with regard to
+    # the resized input image.
+    gradient = tf.gradients(loss, resized_image)
+#+END_SRC
+
+*** start tf session
+ We need a TensorFlow session to execute the graph.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ session = tf.Session(graph=model.graph)
+
+#+END_SRC
+
+*** Helper-function for finding Adversary Noise
+ The following function finds the noise that must be added to the given input
+ image so as to be classified as the desired target-class.
+
+ This function essentially just performs optimization with gradient descent.
+
+ The noise is initialized to zero and then iteratively updated using the
+ gradient of the loss-function with regard to the noisy input image, so that:
+
+ #+BEGIN_QUOTE
+ *in each step the noise brings the classification closer to the desired
+ target-class*.
+ #+END_QUOTE
+
+ The optimization is terminated when the target-classification is reached with
+ the required score (e.g. 99%), or when the max number of iterations have been
+ performed.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ def find_adversary_noise(image_path, cls_target, noise_limit=3.0,
+                          required_score=0.99, max_iterations=100):
+     """
+     Find the noise that must be added to the given image so
+     that it is classified as the target-class.
+
+     image_path: File-path to the input-image (must be *.jpg).
+     cls_target: Target class-number (integer between 1-1000).
+     noise_limit: Limit for pixel-values in the noise.
+     required_score: Stop when target-class score reaches this.
+     max_iterations: Max number of optimization iterations to perform.
+     """
+ ​
+     # Create a feed-dict with the image.
+     feed_dict = model._create_feed_dict(image_path=image_path)
+ ​
+     # Use TensorFlow to calculate the predicted class-scores
+     # (aka. probabilities) as well as the resized image.
+     pred, image = session.run([y_pred, resized_image],
+                               feed_dict=feed_dict)
+ ​
+     # Convert to one-dimensional array.
+     pred = np.squeeze(pred)
+ ​
+     # Predicted class-number.
+     cls_source = np.argmax(pred)
+ ​
+     # Score for the predicted class (aka. probability or confidence).
+     score_source_org = pred.max()
+ ​
+     # Names for the source and target classes.
+     name_source = model.name_lookup.cls_to_name(cls_source,
+                                                 only_first_name=True)
+     name_target = model.name_lookup.cls_to_name(cls_target,
+                                                 only_first_name=True)
+ ​
+     # Initialize the noise to zero.
+     noise = 0
+ ​
+     # Perform a number of optimization iterations to find
+     # the noise that causes mis-classification of the input image.
+     for i in range(max_iterations):
+         print("Iteration:", i)
+ ​
+         # The noisy image is just the sum of the input image and noise.
+         noisy_image = image + noise
+ ​
+         # Ensure the pixel-values of the noisy image are between
+         # 0 and 255 like a real image. If we allowed pixel-values
+         # outside this range then maybe the mis-classification would
+         # be due to this 'illegal' input breaking the Inception model.
+         noisy_image = np.clip(a=noisy_image, a_min=0.0, a_max=255.0)
+ ​
+         # Create a feed-dict. This feeds the noisy image to the
+         # tensor in the graph that holds the resized image, because
+         # this is the final stage for inputting raw image data.
+         # This also feeds the target class-number that we desire.
+         feed_dict = {model.tensor_name_resized_image: noisy_image,
+                      pl_cls_target: cls_target}
+ ​
+         # Calculate the predicted class-scores as well as the gradient.
+         pred, grad = session.run([y_pred, gradient],
+                                  feed_dict=feed_dict)
+ ​
+         # Convert the predicted class-scores to a one-dim array.
+         pred = np.squeeze(pred)
+ ​
+         # The scores (probabilities) for the source and target classes.
+         score_source = pred[cls_source]
+         score_target = pred[cls_target]
+ ​
+         # Squeeze the dimensionality for the gradient-array.
+         grad = np.array(grad).squeeze()
+ ​
+         # The gradient now tells us how much we need to change the
+         # noisy input image in order to move the predicted class
+         # closer to the desired target-class.
+ ​
+         # Calculate the max of the absolute gradient values.
+         # This is used to calculate the step-size.
+         grad_absmax = np.abs(grad).max()
+
+         # If the gradient is very small then use a lower limit,
+         # because we will use it as a divisor.
+         if grad_absmax < 1e-10:
+             grad_absmax = 1e-10
+ ​
+         # Calculate the step-size for updating the image-noise.
+         # This ensures that at least one pixel colour is changed by 7.
+         # Recall that pixel colours can have 255 different values.
+         # This step-size was found to give fast convergence.
+         step_size = 7 / grad_absmax
+ ​
+         # Print the score etc. for the source-class.
+         msg = "Source score: {0:>7.2%}, class-number: {1:>4}, class-name: {2}"
+         print(msg.format(score_source, cls_source, name_source))
+ ​
+         # Print the score etc. for the target-class.
+         msg = "Target score: {0:>7.2%}, class-number: {1:>4}, class-name: {2}"
+         print(msg.format(score_target, cls_target, name_target))
+ ​
+         # Print statistics for the gradient.
+         msg = "Gradient min: {0:>9.6f}, max: {1:>9.6f}, stepsize: {2:>9.2f}"
+         print(msg.format(grad.min(), grad.max(), step_size))
+ ​
+         # Newline.
+         print()
+ ​
+         # If the score for the target-class is not high enough.
+         if score_target < required_score:
+             # Update the image-noise by subtracting the gradient
+             # scaled by the step-size.
+             noise -= step_size * grad
+ ​
+             # Ensure the noise is within the desired range.
+             # This avoids distorting the image too much.
+             noise = np.clip(a=noise,
+                             a_min=-noise_limit,
+                             a_max=noise_limit)
+         else:
+             # Abort the optimization because the score is high enough.
+             break
+ ​
+     return image.squeeze(), noisy_image.squeeze(), noise, \
+            name_source, name_target, \
+            score_source, score_source_org, score_target
+
+#+END_SRC
+
+*** Helper-function for plotting image and noise
+ This function normalizes the input so its values are between 0.0 and 1.0 which
+ is needed to show the noise properly.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ def normalize_image(x):
+     # Get the min and max values for all pixels in the input.
+     x_min = x.min()
+     x_max = x.max()
+ ​
+     # Normalize so all values are between 0.0 and 1.0
+     x_norm = (x - x_min) / (x_max - x_min)
+ ​
+     return x_norm
+#+END_SRC
+
+This function plots the original image, the noisy image, and the noise. It also
+shows the class-names and scores.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ def plot_images(image, noise, noisy_image,
+                 name_source, name_target,
+                 score_source, score_source_org, score_target):
+     """
+     Plot the image, the noisy image and the noise.
+     Also shows the class-names and scores.
+ ​
+     Note that the noise is amplified to use the full range of
+     colours, otherwise if the noise is very low it would be
+     hard to see.
+ ​
+     image: Original input image.
+     noise: Noise that has been added to the image.
+     noisy_image: Input image + noise.
+     name_source: Name of the source-class.
+     name_target: Name of the target-class.
+     score_source: Score for the source-class.
+     score_source_org: Original score for the source-class.
+     score_target: Score for the target-class.
+     """
+
+     # Create figure with sub-plots.
+     fig, axes = plt.subplots(1, 3, figsize=(10,10))
+ ​
+     # Adjust vertical spacing.
+     fig.subplots_adjust(hspace=0.1, wspace=0.1)
+ ​
+     # Use interpolation to smooth pixels?
+     smooth = True
+
+     # Interpolation type.
+     if smooth:
+         interpolation = 'spline16'
+     else:
+         interpolation = 'nearest'
+ ​
+     # Plot the original image.
+     # Note that the pixel-values are normalized to the [0.0, 1.0]
+     # range by dividing with 255.
+     ax = axes.flat[0]
+     ax.imshow(image / 255.0, interpolation=interpolation)
+     msg = "Original Image:\n{0} ({1:.2%})"
+     xlabel = msg.format(name_source, score_source_org)
+     ax.set_xlabel(xlabel)
+ ​
+     # Plot the noisy image.
+     ax = axes.flat[1]
+     ax.imshow(noisy_image / 255.0, interpolation=interpolation)
+     msg = "Image + Noise:\n{0} ({1:.2%})\n{2} ({3:.2%})"
+     xlabel = msg.format(name_source, score_source, name_target, score_target)
+     ax.set_xlabel(xlabel)
+ ​
+     # Plot the noise.
+     # The colours are amplified otherwise they would be hard to see.
+     ax = axes.flat[2]
+     ax.imshow(normalize_image(noise), interpolation=interpolation)
+     xlabel = "Amplified Noise"
+     ax.set_xlabel(xlabel)
+ ​
+     # Remove ticks from all the plots.
+     for ax in axes.flat:
+         ax.set_xticks([])
+         ax.set_yticks([])
+
+     # Ensure the plot is shown correctly with multiple plots
+     # in a single Notebook cell.
+     plt.show()
+
+#+END_SRC
+
+*** Helper-function for finding and plotting adversarial example
+ This function combines the above two helper-functions. It first finds the
+ adversarial noise and then plots the image with the noise.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ def adversary_example(image_path, cls_target,
+                       noise_limit, required_score):
+     """
+     Find and plot adversarial noise for the given image.
+
+     image_path: File-path to the input-image (must be *.jpg).
+     cls_target: Target class-number (integer between 1-1000).
+     noise_limit: Limit for pixel-values in the noise.
+     required_score: Stop when target-class score reaches this.
+     """
+ ​
+     # Find the adversarial noise.
+     image, noisy_image, noise, \
+     name_source, name_target, \
+     score_source, score_source_org, score_target = \
+         find_adversary_noise(image_path=image_path,
+                              cls_target=cls_target,
+                              noise_limit=noise_limit,
+                              required_score=required_score)
+ ​
+     # Plot the image and the noise.
+     plot_images(image=image, noise=noise, noisy_image=noisy_image,
+                 name_source=name_source, name_target=name_target,
+                 score_source=score_source,
+                 score_source_org=score_source_org,
+                 score_target=score_target)
+ ​
+     # Print some statistics for the noise.
+     msg = "Noise min: {0:.3f}, max: {1:.3f}, mean: {2:.3f}, std: {3:.3f}"
+     print(msg.format(noise.min(), noise.max(),
+                      noise.mean(), noise.std()))
+
+#+END_SRC
+
+** Results
+*** Parrot
+ This example takes an input image of a parrot and finds adversarial noise that
+ causes the Inception model to mis-classify the image as a bookcase
+ (class-number 300).
+
+ The noise-limit is set to 3.0 which means that each pixel-colour is only
+ allowed to change by max ± 3.0. Each pixel-colour is a value between 0 and 255,
+ so a change of ± 3.0 corresponds to only about 1.2% of the range of possible
+ values. Such a small amount of noise is imperceptible to the human eye, so the
+ noisy image looks exactly like the original image, as shown below.
+
+ The required-score is set to 0.99 which means the optimization that finds the
+ adversarial noise will stop when the target classification score is 0.99 or
+ higher, so the Inception model is almost completely certain that the noisy
+ image shows the desired target class.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ image_path = "images/parrot_cropped1.jpg"
+ adversary_example(image_path=image_path,
+                   cls_target=300,
+                   noise_limit=3.0,
+                   required_score=0.99)
+#+END_SRC
+ ​
+ Iteration: 0
+ Source score:  97.38%, class-number:  409, class-name: macaw
+ Target score:   0.00%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001329, max:  0.001370, stepsize:   5110.94
+
+ Iteration: 1
+ Source score:  88.87%, class-number:  409, class-name: macaw
+ Target score:   0.01%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001499, max:  0.001401, stepsize:   4668.28
+
+ Iteration: 2
+ Source score:  68.47%, class-number:  409, class-name: macaw
+ Target score:   0.06%, class-number:  300, class-name: bookcase
+ Gradient min: -0.003093, max:  0.002587, stepsize:   2262.91
+
+ Iteration: 3
+ Source score:  16.76%, class-number:  409, class-name: macaw
+ Target score:   0.22%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001077, max:  0.001047, stepsize:   6499.39
+
+ Iteration: 4
+ Source score:  31.76%, class-number:  409, class-name: macaw
+ Target score:   0.41%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001670, max:  0.001715, stepsize:   4081.82
+
+ Iteration: 5
+ Source score:  11.86%, class-number:  409, class-name: macaw
+ Target score:   0.72%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001524, max:  0.002019, stepsize:   3466.85
+
+ Iteration: 6
+ Source score:   2.41%, class-number:  409, class-name: macaw
+ Target score:   3.26%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001685, max:  0.001247, stepsize:   4154.00
+
+ Iteration: 7
+ Source score:   3.02%, class-number:  409, class-name: macaw
+ Target score:   7.07%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001503, max:  0.001707, stepsize:   4101.29
+
+ Iteration: 8
+ Source score:   2.34%, class-number:  409, class-name: macaw
+ Target score:   6.59%, class-number:  300, class-name: bookcase
+ Gradient min: -0.003677, max:  0.003430, stepsize:   1903.80
+
+ Iteration: 9
+ Source score:   1.33%, class-number:  409, class-name: macaw
+ Target score:  16.10%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001366, max:  0.001558, stepsize:   4492.61
+
+ Iteration: 10
+ Source score:   0.85%, class-number:  409, class-name: macaw
+ Target score:  14.19%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001632, max:  0.001372, stepsize:   4288.61
+
+ Iteration: 11
+ Source score:   0.89%, class-number:  409, class-name: macaw
+ Target score:  38.05%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001264, max:  0.000991, stepsize:   5539.81
+
+ Iteration: 12
+ Source score:   0.44%, class-number:  409, class-name: macaw
+ Target score:  35.43%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001744, max:  0.002125, stepsize:   3293.86
+
+ Iteration: 13
+ Source score:   0.29%, class-number:  409, class-name: macaw
+ Target score:  60.42%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000611, max:  0.000705, stepsize:   9927.19
+
+ Iteration: 14
+ Source score:   0.24%, class-number:  409, class-name: macaw
+ Target score:  40.47%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001014, max:  0.001096, stepsize:   6385.38
+
+ Iteration: 15
+ Source score:   1.98%, class-number:  409, class-name: macaw
+ Target score:  41.95%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001578, max:  0.001865, stepsize:   3753.93
+
+ Iteration: 16
+ Source score:   0.04%, class-number:  409, class-name: macaw
+ Target score:  78.76%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000333, max:  0.000335, stepsize:  20888.12
+
+ Iteration: 17
+ Source score:   1.93%, class-number:  409, class-name: macaw
+ Target score:  43.73%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001840, max:  0.002724, stepsize:   2569.94
+
+ Iteration: 18
+ Source score:   0.02%, class-number:  409, class-name: macaw
+ Target score:  91.74%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000328, max:  0.000189, stepsize:  21342.00
+
+ Iteration: 19
+ Source score:   0.00%, class-number:  409, class-name: macaw
+ Target score:  97.37%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000064, max:  0.000084, stepsize:  83366.77
+
+ Iteration: 20
+ Source score:   0.01%, class-number:  409, class-name: macaw
+ Target score:  97.13%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000089, max:  0.000086, stepsize:  78565.60
+
+ Iteration: 21
+ Source score:   0.01%, class-number:  409, class-name: macaw
+ Target score:  94.92%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000128, max:  0.000142, stepsize:  49304.41
+
+ Iteration: 22
+ Source score:   0.01%, class-number:  409, class-name: macaw
+ Target score:  97.18%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000071, max:  0.000058, stepsize:  97917.04
+
+ Iteration: 23
+ Source score:   0.01%, class-number:  409, class-name: macaw
+ Target score:  95.90%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000111, max:  0.000142, stepsize:  49346.70
+
+ Iteration: 24
+ Source score:   0.00%, class-number:  409, class-name: macaw
+ Target score:  98.98%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000029, max:  0.000025, stepsize: 245266.90
+
+ Iteration: 25
+ Source score:   0.00%, class-number:  409, class-name: macaw
+ Target score:  99.12%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000019, max:  0.000022, stepsize: 311258.06
+
+
+ Noise min: -3.000, max: 3.000, mean: 0.001, std: 1.492
+
+*** interpretation of 'specialized' noise
+ As shown above, the original image of the parrot looks exactly like the noisy
+ image. The human eye cannot tell the difference between these two images. The
+ original image is correctly classified by the Inception model as a macaw (i.e.
+ parrot) with a score of 97.38%. But the noisy image has a classification score
+ of 0.00% for macaw and 99.12% for a bookcase.
+
+ So we have fooled the Inception model into believing that an image of a parrot
+ shows a bookcase. This mis-classification was achieved simply by adding a
+ little *'specialized' noise*.
+
+ Note that the noise shown above has been greatly amplified. In reality, the
+ noise adjusts the colour intensity of each pixel in the input image by a
+ maximum of 1.2% of the possible intensity range (assuming the noise-limit is
+ set to 3.0 in the function above). Because the noise is so low, the change is
+ imperceptible to humans, but it causes the Inception model to completely
+ mis-classify the input image.
+
+*** Elon Musk
+ We can also find adversarial noise for an image of Elon Musk. The target-class
+ is again set to a 'bookcase' (class-number 300), with the same settings for the
+ noise-limit and required score as above.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ image_path = "images/elon_musk.jpg"
+ adversary_example(image_path=image_path,
+                   cls_target=300,
+                   noise_limit=3.0,
+                   required_score=0.99)
+#+END_SRC
+ ​
+ Iteration: 0
+ Source score:  19.73%, class-number:  837, class-name: sweatshirt
+ Target score:   0.01%, class-number:  300, class-name: bookcase
+ Gradient min: -0.008348, max:  0.005946, stepsize:    838.48
+
+ Iteration: 1
+ Source score:   1.77%, class-number:  837, class-name: sweatshirt
+ Target score:   0.24%, class-number:  300, class-name: bookcase
+ Gradient min: -0.002952, max:  0.005907, stepsize:   1185.13
+
+ Iteration: 2
+ Source score:   0.52%, class-number:  837, class-name: sweatshirt
+ Target score:  10.06%, class-number:  300, class-name: bookcase
+ Gradient min: -0.006741, max:  0.006555, stepsize:   1038.46
+
+ Iteration: 3
+ Source score:   0.24%, class-number:  837, class-name: sweatshirt
+ Target score:  67.35%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001548, max:  0.001130, stepsize:   4521.39
+
+ Iteration: 4
+ Source score:   0.01%, class-number:  837, class-name: sweatshirt
+ Target score:  68.76%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001654, max:  0.001889, stepsize:   3706.45
+
+ Iteration: 5
+ Source score:   0.12%, class-number:  837, class-name: sweatshirt
+ Target score:  84.91%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001288, max:  0.001800, stepsize:   3889.91
+
+ Iteration: 6
+ Source score:   0.00%, class-number:  837, class-name: sweatshirt
+ Target score:  99.09%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000029, max:  0.000021, stepsize: 244856.71
+
+
+ Noise min: -3.000, max: 3.000, mean: -0.001, std: 0.668
+
+ The Inception model was confused about the classification of the original input
+ image, classifying it as maybe a sweatshirt (score 19.73%). But we could still
+ generate adversarial noise that made the Inception model almost completely
+ certain that the noisy image shows a bookcase (score 99.09%), even though the
+ two images seem to be exactly the same to the human eye.
+
+*** Willy Wonka (New)
+
+    #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ image_path = "images/willy_wonka_new.jpg"
+
+ adversary_example(image_path=image_path,
+                   cls_target=300,
+                   noise_limit=3.0,
+                   required_score=0.99)
+    #+END_SRC
+
+    Iteration: 0
+ Source score:  31.48%, class-number:  535, class-name: sunglasses
+ Target score:   0.03%, class-number:  300, class-name: bookcase
+ Gradient min: -0.002181, max:  0.001478, stepsize:   3210.13
+
+ Iteration: 1
+ Source score:   2.08%, class-number:  535, class-name: sunglasses
+ Target score:   0.13%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001447, max:  0.001573, stepsize:   4449.85
+
+ Iteration: 2
+ Source score:   6.37%, class-number:  535, class-name: sunglasses
+ Target score:   0.35%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001421, max:  0.001633, stepsize:   4286.13
+
+ Iteration: 3
+ Source score:   2.25%, class-number:  535, class-name: sunglasses
+ Target score:   1.03%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001736, max:  0.001874, stepsize:   3734.86
+
+ Iteration: 4
+ Source score:  10.54%, class-number:  535, class-name: sunglasses
+ Target score:   1.32%, class-number:  300, class-name: bookcase
+ Gradient min: -0.002901, max:  0.002503, stepsize:   2413.04
+
+ Iteration: 5
+ Source score:   1.86%, class-number:  535, class-name: sunglasses
+ Target score:   3.22%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001784, max:  0.001904, stepsize:   3675.68
+
+ Iteration: 6
+ Source score:   2.19%, class-number:  535, class-name: sunglasses
+ Target score:   5.44%, class-number:  300, class-name: bookcase
+ Gradient min: -0.002405, max:  0.001714, stepsize:   2911.17
+
+ Iteration: 7
+ Source score:   4.16%, class-number:  535, class-name: sunglasses
+ Target score:   3.61%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001463, max:  0.002057, stepsize:   3402.83
+
+ Iteration: 8
+ Source score:   2.25%, class-number:  535, class-name: sunglasses
+ Target score:  19.46%, class-number:  300, class-name: bookcase
+ Gradient min: -0.003193, max:  0.001512, stepsize:   2192.48
+
+ Iteration: 9
+ Source score:   1.25%, class-number:  535, class-name: sunglasses
+ Target score:  50.62%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000910, max:  0.000770, stepsize:   7693.95
+
+ Iteration: 10
+ Source score:   0.86%, class-number:  535, class-name: sunglasses
+ Target score:  37.99%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001351, max:  0.001484, stepsize:   4718.11
+
+ Iteration: 11
+ Source score:   6.40%, class-number:  535, class-name: sunglasses
+ Target score:  27.42%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001785, max:  0.001544, stepsize:   3920.83
+
+ Iteration: 12
+ Source score:   0.17%, class-number:  535, class-name: sunglasses
+ Target score:  73.86%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000646, max:  0.000842, stepsize:   8315.79
+
+ Iteration: 13
+ Source score:   0.16%, class-number:  535, class-name: sunglasses
+ Target score:  89.56%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000217, max:  0.000296, stepsize:  23618.89
+
+ Iteration: 14
+ Source score:   0.19%, class-number:  535, class-name: sunglasses
+ Target score:  89.90%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000196, max:  0.000241, stepsize:  29075.62
+
+ Iteration: 15
+ Source score:   0.28%, class-number:  535, class-name: sunglasses
+ Target score:  87.20%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000232, max:  0.000209, stepsize:  30222.49
+
+ Iteration: 16
+ Source score:   0.99%, class-number:  535, class-name: sunglasses
+ Target score:  75.64%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000799, max:  0.000592, stepsize:   8761.73
+
+ Iteration: 17
+ Source score:   0.06%, class-number:  535, class-name: sunglasses
+ Target score:  96.55%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000078, max:  0.000057, stepsize:  90126.50
+
+ Iteration: 18
+ Source score:   0.26%, class-number:  535, class-name: sunglasses
+ Target score:  85.38%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000487, max:  0.000490, stepsize:  14284.58
+
+ Iteration: 19
+ Source score:   0.25%, class-number:  535, class-name: sunglasses
+ Target score:  93.26%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000143, max:  0.000156, stepsize:  44844.46
+
+ Iteration: 20
+ Source score:   0.07%, class-number:  535, class-name: sunglasses
+ Target score:  93.84%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000166, max:  0.000141, stepsize:  42205.53
+
+ Iteration: 21
+ Source score:   0.03%, class-number:  535, class-name: sunglasses
+ Target score:  98.31%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000033, max:  0.000026, stepsize: 213124.72
+
+ Iteration: 22
+ Source score:   0.03%, class-number:  535, class-name: sunglasses
+ Target score:  98.80%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000023, max:  0.000027, stepsize: 260036.19
+
+ Iteration: 23
+ Source score:   0.03%, class-number:  535, class-name: sunglasses
+ Target score:  99.03%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000022, max:  0.000024, stepsize: 294094.62
+
+
+ Noise min: -3.000, max: 3.000, mean: 0.010, std: 1.534
+
+ In the above image of Willy Wonka (new film-version), the Inception model
+ originally classified the image as 'sunglasses' (score 31.48%). But once again
+ we were able to create adversarial noise that caused the Inception model to
+ classify the image as a 'bookcase' (score 99.03%).
+
+ The two images seem to be identical. But you may be able to tilt your
+ computer-monitor so you can see the noisy patterns have changed slightly in the
+ white areas.
+
+*** Willy Wonka (Old)
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ image_path = "images/willy_wonka_old.jpg"
+
+ adversary_example(image_path=image_path,
+                   cls_target=300,
+                   noise_limit=3.0,
+                   required_score=0.99)
+#+END_SRC
+ ​
+ Iteration: 0
+ Source score:  97.22%, class-number:  817, class-name: bow tie
+ Target score:   0.00%, class-number:  300, class-name: bookcase
+ Gradient min: -0.002479, max:  0.003469, stepsize:   2017.94
+
+ Iteration: 1
+ Source score:  10.65%, class-number:  817, class-name: bow tie
+ Target score:   0.08%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000859, max:  0.001458, stepsize:   4799.50
+
+ Iteration: 2
+ Source score:   2.21%, class-number:  817, class-name: bow tie
+ Target score:   0.25%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000415, max:  0.000617, stepsize:  11350.70
+
+ Iteration: 3
+ Source score:   3.59%, class-number:  817, class-name: bow tie
+ Target score:   0.74%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000643, max:  0.000752, stepsize:   9304.24
+
+ Iteration: 4
+ Source score:   3.05%, class-number:  817, class-name: bow tie
+ Target score:   1.42%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000744, max:  0.000688, stepsize:   9407.59
+
+ Iteration: 5
+ Source score:   1.80%, class-number:  817, class-name: bow tie
+ Target score:   1.35%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000924, max:  0.000954, stepsize:   7334.48
+
+ Iteration: 6
+ Source score:   9.09%, class-number:  817, class-name: bow tie
+ Target score:   3.70%, class-number:  300, class-name: bookcase
+ Gradient min: -0.002771, max:  0.003224, stepsize:   2171.03
+
+ Iteration: 7
+ Source score:   1.05%, class-number:  817, class-name: bow tie
+ Target score:  15.34%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001409, max:  0.001925, stepsize:   3637.15
+
+ Iteration: 8
+ Source score:   1.58%, class-number:  817, class-name: bow tie
+ Target score:  32.90%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001282, max:  0.001393, stepsize:   5023.51
+
+ Iteration: 9
+ Source score:   0.98%, class-number:  817, class-name: bow tie
+ Target score:  32.66%, class-number:  300, class-name: bookcase
+ Gradient min: -0.001728, max:  0.001736, stepsize:   4032.38
+
+ Iteration: 10
+ Source score:   0.59%, class-number:  817, class-name: bow tie
+ Target score:  66.56%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000976, max:  0.000736, stepsize:   7173.06
+
+ Iteration: 11
+ Source score:   0.10%, class-number:  817, class-name: bow tie
+ Target score:  85.64%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000260, max:  0.000254, stepsize:  26939.47
+
+ Iteration: 12
+ Source score:   0.15%, class-number:  817, class-name: bow tie
+ Target score:  89.87%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000341, max:  0.000252, stepsize:  20529.36
+
+ Iteration: 13
+ Source score:   0.00%, class-number:  817, class-name: bow tie
+ Target score:  98.09%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000037, max:  0.000041, stepsize: 168840.03
+
+ Iteration: 14
+ Source score:   0.07%, class-number:  817, class-name: bow tie
+ Target score:  95.18%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000212, max:  0.000168, stepsize:  32997.19
+
+ Iteration: 15
+ Source score:   0.00%, class-number:  817, class-name: bow tie
+ Target score:  99.72%, class-number:  300, class-name: bookcase
+ Gradient min: -0.000004, max:  0.000004, stepsize: 1590352.60
+
+
+ Noise min: -3.000, max: 3.000, mean: -0.000, std: 1.309
+
+ This image of Willy Wonka (old film-version) was originally classified as a
+ 'bow tie' (score 97.22%) by the Inception model. But once again it becomes
+ classified as a 'bookcase' (score 99.72%) when adding the adversarial noise.
+
+
+*** Close TensorFlow Session
+ We are now done using TensorFlow, so we close the session to release its
+ resources. Note that we have two TensorFlow-sessions, one is inside the
+ model-object.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+ # This has been commented out in case you want to modify and experiment
+ # with the Notebook without having to restart it.
+ # session.close()
+ # model.close()
+#+END_SRC
+
+*** Conclusion
+ We have shown how to find so-called ~Adversarial Examples~ that cause the
+ Inception model to mis-classify images.
+
+ Through a simple optimization process, we find noise that can be added to an
+ input image so as to cause the Inception model to mis-classify the image, even
+ though each pixel has only been changed slightly and the difference is
+ imperceptible to humans.
+
+ Furthermore, the noise can be optimized so as to give a score (aka. probability
+ or confidence) of nearly 100%. So not only is the input image mis-classified,
+ but the neural network is apparently very confident that it has correctly
+ classified the image.
+
+ This is a general problem for neural networks and it is a very serious problem!
+ Until we have a good understanding of *why this happens and how to fix it, we
+ cannot trust neural networks in critical applications*.
+
+ #+BEGIN_QUOTE
+ *Imagine what would happen if a self-driving car ignores a stop-sign or a
+ person crossing the road because its neural networks have mis-classified the
+ input images*.
+ #+END_QUOTE
+
+ Research into this problem is ongoing and you are encouraged to do an internet
+ search for recent papers on the subject. Maybe you can find the solution to
+ this problem?
+
+*** Exercises
+ These are a few suggestions for exercises that may help improve your skills
+ with TensorFlow. It is important to get hands-on experience with TensorFlow in
+ order to learn how to use it properly.
+
+ You may want to backup this Notebook and the other files before making any
+ changes.
+
+#+BEGIN_QUOTE
+ Try using some of your own images.
+ Try other arguments for adversary_example(). Try another target-class, noise-limit and required score. What is the result?
+ Do you think it is possible to generate adversarial noise that would cause mis-classification for any desired target-class? How would you prove your theory?
+ Try another formula for calculating the step-size in find_adversary_noise(). Can you make the optimization converge faster?
+ Try blurring the noisy input-image right before it is input into the neural network. Does it remove the adversarial noise and cause correct classification again?
+ Try lowering the bit-depth of the noisy input image instead of blurring it. Does it remove the adversarial noise and result in correct classification? For example if you only allow 16 or 32 colour-levels for Red, Green and Blue, whereas normally there are 255 levels.
+ Do you think your noise-removal also works for hand-written digits in the MNIST data-set, or for strange geometric shapes? These are sometimes called 'fooling images', do an internet search.
+ Can you find adversarial noise that would work for all images, so you don't have to find adversarial noise specifically for each image? How would you do this?
+ Can you implement the optimization in find_adversary_noise() directly in TensorFlow instead of using NumPy? You would need to make the noise a variable in the TensorFlow graph as well, so it can be optimized by TensorFlow.
+ Explain to a friend what Adversarial Examples are and how the program finds them.
+#+END_QUOTE
+
+* Misc tools
+** numpy
+*** np.clip(arr, lowerbound, upperbound)
+
+change all elements of 'arr' not between 'lowerbound' and 'upbound' specified by
+clip(), to 'lowerbound' and 'upbound'
+
+Examples
+
+>>> a = np.arange(10)
+>>> np.clip(a, 1, 8)
+array([1, 1, 2, 3, 4, 5, 6, 7, 8, 8])
+>>> a
+array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+>>> np.clip(a, 3, 6, out=a)
+array([3, 3, 3, 3, 4, 5, 6, 6, 6, 6])
+>>> a = np.arange(10)
+>>> a
+array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+>>> np.clip(a, [3, 4, 1, 1, 1, 4, 4, 4, 4, 4], 8)
+array([3, 4, 2, 3, 4, 5, 6, 7, 8, 8])

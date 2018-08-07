@@ -1,0 +1,1494 @@
+#+TITLE: TensorFlow Tutorial #03-C
+* Keras API
+** Preview
+*** Introduction to keras API
+    Tutorial #02 showed how to implement a Convolutional Neural Network in
+TensorFlow. We made a few helper-functions for creating the layers in the
+network. It is essential to have a good high-level API because it makes it much
+easier to implement complex models, and it lowers the risk of errors.
+
+There are several of these builder API's available for TensorFlow: PrettyTensor
+(Tutorial #03), Layers API (Tutorial #03-B), and several others. But they were
+never really finished and now they seem to be more or less abandoned by their
+developers.
+
+This tutorial is about the Keras API which is already highly developed with very
+good documentation - and the development continues. *It seems likely that Keras
+will be the standard API for TensorFlow in the future so it is recommended that
+you use it instead of the other APIs*.
+
+The author of Keras has written a blog-post on his API design philosophy which
+you should read.
+
+*** Flowchart
+The following chart shows roughly how the data flows in the Convolutional Neural
+Network that is implemented below. See Tutorial #02 for a more detailed
+description of convolution.
+
+There are two convolutional layers, each followed by a down-sampling using
+max-pooling (not shown in this flowchart). Then there are two fully-connected
+layers ending in a softmax-classifier.
+
+
+file:images/02_network_flowchart.png
+
+*** Imports
+
+    #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+%matplotlib inline
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import numpy as np
+import math
+    #+END_SRC
+
+    #+RESULTS:
+    :RESULTS:
+    # Out[3]:
+    :END:
+
+/home/magnus/anaconda3/envs/tf-gpu/lib/python3.6/importlib/_bootstrap.py:205: RuntimeWarning: compiletime version 3.5 of module 'tensorflow.python.framework.fast_tensor_util' does not match runtime version 3.6
+  return f(*args, **kwds)
+
+We need to import several things from Keras. Note the long import-statements.
+This might be a bug. Hopefully it will be possible to write shorter and more
+elegant lines in the future.
+
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# from tf.keras.models import Sequential  # This does not work!
+from tensorflow.python.keras.models import Sequential
+from tensorflow.python.keras.layers import InputLayer, Input
+from tensorflow.python.keras.layers import Reshape, MaxPooling2D
+from tensorflow.python.keras.layers import Conv2D, Dense, Flatten
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[4]:
+:END:
+
+This was developed using Python 3.6 (Anaconda) and TensorFlow version:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+tf.__version__
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[5]:
+: '1.6.0'
+:END:
+
+'1.4.0'
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+tf.keras.__version__
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[6]:
+: '2.1.3-tf'
+:END:
+
+'2.0.8-tf'
+
+*** Load Data
+The MNIST data-set is about 12 MB and will be downloaded automatically if it is
+not located in the given path.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from tensorflow.examples.tutorials.mnist import input_data
+data = input_data.read_data_sets('data/MNIST/', one_hot=True)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[7]:
+:END:
+
+Extracting data/MNIST/train-images-idx3-ubyte.gz
+Extracting data/MNIST/train-labels-idx1-ubyte.gz
+Extracting data/MNIST/t10k-images-idx3-ubyte.gz
+Extracting data/MNIST/t10k-labels-idx1-ubyte.gz
+
+The MNIST data-set has now been loaded and consists of 70,000 images and
+associated labels (i.e. classifications of the images). The data-set is split
+into 3 mutually exclusive sub-sets. We will only use the training and test-sets
+in this tutorial.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+print("Size of:")
+print("- Training-set:\t\t{}".format(len(data.train.labels)))
+print("- Test-set:\t\t{}".format(len(data.test.labels)))
+print("- Validation-set:\t{}".format(len(data.validation.labels)))
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[8]:
+:END:
+
+Size of:
+- Training-set:		55000
+- Test-set:		10000
+- Validation-set:	5000
+
+The class-labels are One-Hot encoded, which means that each label is a vector
+with 10 elements, all of which are zero except for one element. The index of
+this one element is the class-number, that is, the digit shown in the associated
+image. We also need the class-numbers as integers for the test-set, so we
+calculate it now.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+data.test.cls = np.argmax(data.test.labels, axis=1)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[9]:
+:END:
+
+*** Data Dimensions
+The data dimensions are used in several places in the source-code below. They
+are defined once so we can use these variables instead of numbers throughout the
+source-code below.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# We know that MNIST images are 28 pixels in each dimension.
+img_size = 28
+
+# Images are stored in one-dimensional arrays of this length.
+img_size_flat = img_size * img_size
+
+# Tuple with height and width of images used to reshape arrays.
+# This is used for plotting the images.
+img_shape = (img_size, img_size)
+
+# Tuple with height, width and depth used to reshape arrays.
+# This is used for reshaping in Keras.
+img_shape_full = (img_size, img_size, 1)
+
+# Number of colour channels for the images: 1 channel for gray-scale.
+num_channels = 1
+
+# Number of classes, one class for each of 10 digits.
+num_classes = 10
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[10]:
+:END:
+
+*** Helper-function for plotting images
+Function used to plot 9 images in a 3x3 grid, and writing the true and predicted
+classes below each image.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def plot_images(images, cls_true, cls_pred=None):
+    assert len(images) == len(cls_true) == 9
+
+    # Create figure with 3x3 sub-plots.
+    fig, axes = plt.subplots(3, 3)
+    fig.subplots_adjust(hspace=0.3, wspace=0.3)
+
+    for i, ax in enumerate(axes.flat):
+        # Plot image.
+        ax.imshow(images[i].reshape(img_shape), cmap='binary')
+
+        # Show true and predicted classes.
+        if cls_pred is None:
+            xlabel = "True: {0}".format(cls_true[i])
+        else:
+            xlabel = "True: {0}, Pred: {1}".format(cls_true[i], cls_pred[i])
+
+        # Show the classes as the label on the x-axis.
+        ax.set_xlabel(xlabel)
+
+        # Remove ticks from the plot.
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Ensure the plot is shown correctly with multiple plots
+    # in a single Notebook cell.
+    plt.show()
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[11]:
+:END:
+
+*** Plot a few images to see if data is correct
+
+    #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# Get the first images from the test-set.
+images = data.test.images[0:9]
+
+# Get the true classes for those images.
+cls_true = data.test.cls[0:9]
+
+# Plot the images and labels using our helper-function above.
+plot_images(images=images, cls_true=cls_true)
+    #+END_SRC
+
+    #+RESULTS:
+    :RESULTS:
+    # Out[12]:
+    [[file:./obipy-resources/6119lnr.png]]
+    :END:
+
+*** Helper-function to plot example errors
+Function for plotting examples of images from the test-set that have been
+mis-classified.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def plot_example_errors(cls_pred):
+    # cls_pred is an array of the predicted class-number for
+    # all images in the test-set.
+
+    # Boolean array whether the predicted class is incorrect.
+    incorrect = (cls_pred != data.test.cls)
+
+    # Get the images from the test-set that have been
+    # incorrectly classified.
+    images = data.test.images[incorrect]
+
+    # Get the predicted classes for those images.
+    cls_pred = cls_pred[incorrect]
+
+    # Get the true classes for those images.
+    cls_true = data.test.cls[incorrect]
+
+    # Plot the first 9 images.
+    plot_images(images=images[0:9],
+                cls_true=cls_true[0:9],
+                cls_pred=cls_pred[0:9])
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[13]:
+:END:
+
+*** PrettyTensor API
+This is how the Convolutional Neural Network was implemented in Tutorial #03
+using the PrettyTensor API. It is shown here for easy comparison to the Keras
+implementation below.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+if False:
+    x_pretty = pt.wrap(x_image)
+
+    with pt.defaults_scope(activation_fn=tf.nn.relu):
+        y_pred, loss = x_pretty.\
+            conv2d(kernel=5, depth=16, name='layer_conv1').\
+            max_pool(kernel=2, stride=2).\
+            conv2d(kernel=5, depth=36, name='layer_conv2').\
+            max_pool(kernel=2, stride=2).\
+            flatten().\
+            fully_connected(size=128, name='layer_fc1').\
+            softmax_classifier(num_classes=num_classes, labels=y_true)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[14]:
+:END:
+
+
+** Sequential Model
+*** 1st, model define
+The *Keras API has two modes of constructing Neural Networks*. The simplest is
+the *Sequential Model* which only allows for *the layers to be added in
+sequence*.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# Start construction of the Keras Sequential model.
+model = Sequential()
+
+# Add an input layer which is similar to a feed_dict in TensorFlow.
+# Note that the input-shape must be a tuple containing the image-size.
+model.add(InputLayer(input_shape=(img_size_flat,)))
+
+# The input is a flattened array with 784 elements,
+# but the convolutional layers expect images with shape (28, 28, 1)
+model.add(Reshape(img_shape_full))
+
+# First convolutional layer with ReLU-activation and max-pooling.
+model.add(Conv2D(kernel_size=5, strides=1, filters=16, padding='same',
+                 activation='relu', name='layer_conv1'))
+model.add(MaxPooling2D(pool_size=2, strides=2))
+
+# Second convolutional layer with ReLU-activation and max-pooling.
+model.add(Conv2D(kernel_size=5, strides=1, filters=36, padding='same',
+                 activation='relu', name='layer_conv2'))
+model.add(MaxPooling2D(pool_size=2, strides=2))
+
+# Flatten the 4-rank output of the convolutional layers
+# to 2-rank that can be input to a fully-connected / dense layer.
+model.add(Flatten())
+
+# First fully-connected / dense layer with ReLU-activation.
+model.add(Dense(128, activation='relu'))
+
+# Last fully-connected / dense layer with softmax-activation
+# for use in classification.
+model.add(Dense(num_classes, activation='softmax'))
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[15]:
+:END:
+
+*** 2nd, model compilation
+The Neural Network has now been defined and must be finalized by adding a
+loss-function, optimizer and performance metrics. This is called model
+"compilation" in Keras.
+
+We can either define the optimizer using a string, or if we want more control of
+its parameters then we need to instantiate an object. For example, we can set
+the learning-rate.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from tensorflow.python.keras.optimizers import Adam
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[16]:
+:END:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+optimizer = Adam(lr=1e-3)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[17]:
+:END:
+
+For a classification-problem such as MNIST which has 10 possible classes, we
+need to use the loss-function called categorical_crossentropy. The performance
+metric we are interested in is the classification accuracy.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model.compile(optimizer=optimizer,
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[18]:
+:END:
+
+*** 3rd, model training
+Now that the model has been fully defined with *loss-function* and *optimizer*,
+we can train it. This function takes numpy-arrays and performs the given number
+of *training epochs* using the given *batch-size*.
+
+An *epoch* is one full use of the *entire training-set*. So for 10 epochs we would
+iterate randomly over the entire training-set 10 times.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model.fit(x=data.train.images,
+          y=data.train.labels,
+          epochs=1, batch_size=128)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[19]:
+: <tensorflow.python.keras._impl.keras.callbacks.History at 0x7f7f8e553550>
+:END:
+
+Epoch 1/1
+55000/55000 [==============================] - 5s - loss: 0.2261 - acc: 0.9335
+<tensorflow.python.keras._impl.keras.callbacks.History at 0x7fc30e732f98>
+Evaluation
+
+*** 4th, model evaluation
+Now that the model has been trained we can test its performance on the test-set.
+This also uses numpy-arrays as input.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+result = model.evaluate(x=data.test.images,
+                        y=data.test.labels)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[20]:
+:END:
+
+ 9152/10000 [==========================>...] - ETA:
+
+ We can print all the performance metrics for the test-set.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+for name, value in zip(model.metrics_names, result):
+    print(name, value)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[21]:
+:END:
+
+loss 0.0618685603024
+acc 0.9801
+
+Or we can just print the classification accuracy.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+print("{0}: {1:.2%}".format(model.metrics_names[1], result[1]))
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[22]:
+:END:
+
+acc: 98.01%
+
+*** 5th, prediction
+We can also *predict* the classification for *new images*. We will just use some
+images from the test-set but you could load your own images into numpy arrays
+and use those instead.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+images = data.test.images[0:9]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[23]:
+:END:
+
+These are the true class-number for those images. This is only used when
+plotting the images.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+cls_true = data.test.cls[0:9]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[24]:
+:END:
+
+Get the predicted classes as One-Hot encoded arrays.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+y_pred = model.predict(x=images)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[25]:
+:END:
+
+Get the predicted classes as integers.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+cls_pred = np.argmax(y_pred,axis=1)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[26]:
+:END:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_images(images=images,
+            cls_true=cls_true,
+            cls_pred=cls_pred)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[27]:
+[[file:./obipy-resources/6119yxx.png]]
+:END:
+
+*** 6th, display mis-predicted images
+
+Examples of Mis-Classified Images
+---------------------------------
+We can plot some examples of mis-classified images from the test-set.
+
+First we get the predicted classes for all the images in the test-set:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+y_pred = model.predict(x=data.test.images)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[28]:
+:END:
+
+Then we convert the predicted class-numbers from One-Hot encoded arrays to
+integers.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+cls_pred = np.argmax(y_pred,axis=1)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[29]:
+:END:
+
+
+Plot some of the mis-classified images.
+---------------------------------
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_example_errors(cls_pred)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[30]:
+[[file:./obipy-resources/6119k7A.png]]
+:END:
+
+
+** Functional Model(build more conplex graph than sequential model)
+*** 1st, model define
+The Keras API can also be used to construct more complicated networks using the
+*Functional Model*.
+
+This may look a little confusing at first, because each call to the Keras API
+will create and return an *instance that is itself callable*.
+
+It is not clear whether it is a function or an object - but we can call it as if
+it is a function. This allows us to *build computational graphs* that are more
+complex than the Sequential Model allows.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+  # Create an input layer which is similar to a feed_dict in TensorFlow. Note
+  # that the input-shape must be a tuple containing the image-size.
+  inputs = Input(shape=(img_size_flat,))
+
+  print ('inputs')
+  print (inputs)
+  # Variable used for building the Neural Network.
+  net = inputs
+
+  # The input is an image as a flattened array with 784 elements.
+  # But the convolutional layers expect images with shape (28, 28, 1)
+  net = Reshape(img_shape_full)(net)
+
+  # First convolutional layer with ReLU-activation and max-pooling.
+  net = Conv2D(kernel_size=5, strides=1, filters=16, padding='same',
+               activation='relu', name='layer_conv1')(net)
+  net = MaxPooling2D(pool_size=2, strides=2)(net)
+
+  # Second convolutional layer with ReLU-activation and max-pooling.
+  net = Conv2D(kernel_size=5, strides=1, filters=36, padding='same',
+               activation='relu', name='layer_conv2')(net)
+  net = MaxPooling2D(pool_size=2, strides=2)(net)
+
+  # Flatten the output of the conv-layer from 4-dim to 2-dim.
+  net = Flatten()(net)
+
+  # First fully-connected / dense layer with ReLU-activation.
+  net = Dense(128, activation='relu')(net)
+
+  # Last fully-connected / dense layer with softmax-activation
+  # so it can be used for classification.
+  net = Dense(num_classes, activation='softmax')(net)
+
+  # Output of the Neural Network.
+  outputs = net
+
+#+END_SRC
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+print (type(net))    #<- tensor
+print (type(inputs)) #<- tensor
+print (type(outputs))#<- tensor
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[79]:
+:END:
+
+*** 1st*, illustration of model define
+#+BEGIN_QUOTE
+.    net = Inputs(xxx);             inputs = net
+.     |                               |
+.     +------------------+            |
+.                        v            |
+.    net = Reshape(xxx)(net)          |
+.     |                               |
+.     +------------------+            |
+.                        v            |
+.    net = Conv2D(xxx)(net)           |
+.     |                               |
+.     +------------------+            |
+.                        v            |
+.    net = MaxPooling2D(net)          |
+.     |                               |
+.     +------------------+            |
+.                        v            +--------------+
+.    net = Conv2D(xxx)(net)                          |
+.     |                                              |
+.     +------------------+                           |
+.                        v                           v
+.    net = MaxPooling2D(net)          Model(inputs=inputs, outputs=outputs)
+.     |                                                                ^
+.     +------------------+                                             |
+.                        v                                             |
+.    net = Flatten(xxx)(net)                                           |
+.     |                                                                |
+.     +------------------+                                             |
+.                        v                                             |
+.    net = Dense(xxx)(net)                                             |
+.     |                                                                |
+.     +------------------+                                             |
+.                        v                                             |
+.    net = Dense(xxx)(net)                                             |
+.     |                                                                |
+.     +--------+                                                       |
+.              v                                                       |
+.    outpus = net                                                      |
+.       |                                                              |
+.       +--------------------------------------------------------------+
+#+END_QUOTE
+
+*** 2nd, model compilation
+We have now defined the architecture of the model with its input and output. We
+now have to create a Keras model and compile it with a loss-function and
+optimizer, so it is ready for training.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from tensorflow.python.keras.models import Model
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[32]:
+:END:
+
+Create a new instance of the *Keras Functional Model*. We give it the
+
+- inputs
+- outputs
+
+of the Convolutional Neural Network that we constructed above.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model2 = Model(inputs=inputs, outputs=outputs)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[33]:
+:END:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model2.summary()
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[77]:
+:END:
+
+Compile the Keras model using the ~rmsprop~ optimizer and with a loss-function
+for *multiple categories*. The only performance metric we are interested in is the
+classification accuracy, but you could use a list of metrics here.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model2.compile(optimizer='rmsprop',
+               loss='categorical_crossentropy',
+               metrics=['accuracy'])
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[34]:
+:END:
+
+*** 3rd, model training
+The model has now been *defined* and *compiled* so it can be trained using the
+same *fit()* function as used in the Sequential Model above. This also takes
+*numpy-arrays as input*.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model2.fit(x=data.train.images,
+           y=data.train.labels,
+           epochs=1, batch_size=128)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[35]:
+: <tensorflow.python.keras._impl.keras.callbacks.History at 0x7f7f8e0dd400>
+:END:
+
+Epoch 1/1
+55000/55000 [==============================] - 2s - loss: 0.1924 - acc: 0.9409
+<tensorflow.python.keras._impl.keras.callbacks.History at 0x7fc30c02ceb8>
+
+*** 4th, model evaluation
+Once the model has been trained we can evaluate its performance on the test-set.
+This is the same syntax as for the Sequential Model.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+result = model2.evaluate(x=data.test.images,
+                         y=data.test.labels)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[36]:
+:END:
+
+ 8992/10000 [=========================>....] - ETA:
+
+ The result is a list of values, containing the loss-value and all the metrics
+ we defined when we compiled the model. Note that 'accuracy' is now called 'acc'
+ which is a small inconsistency.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+for name, value in zip(model2.metrics_names, result):
+    print(name, value)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[37]:
+:END:
+
+loss 0.0654281976447
+acc 0.9786
+
+We can also print the classification accuracy as a percentage:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+print("{0}: {1:.2%}".format(model2.metrics_names[1], result[1]))
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[38]:
+:END:
+
+acc: 97.86%
+
+*** 5th, prediction and display mis-predicted
+We can plot some examples of mis-classified images from the test-set.
+
+First we get the predicted classes for all the images in the test-set:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+y_pred = model2.predict(x=data.test.images)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[39]:
+:END:
+
+Then we convert the predicted class-numbers from One-Hot encoded arrays to
+integers.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+cls_pred = np.argmax(y_pred, axis=1)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[40]:
+:END:
+
+Plot some of the mis-classified images.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_example_errors(cls_pred)
+
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[41]:
+[[file:./obipy-resources/6119xFH.png]]
+:END:
+
+
+** Save & Load Model
+NOTE: You need to install h5py for this to work!
+
+Tutorial #04 was about *saving and restoring the weights of a model* using
+native TensorFlow code. It was an absolutely horrible API! Fortunately, *Keras
+makes this very easy*.
+
+This is the file-path where we want to save the Keras model.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+path_model = 'model.keras'
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[42]:
+:END:
+
+Saving a Keras model with the trained weights is then just a single function
+call, as it should be.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model2.save(path_model)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[43]:
+:END:
+
+Delete the model from memory so we are sure it is no longer used.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+del model2
+#+END_SRC
+
+We need to import this Keras function for loading the model.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from tensorflow.python.keras.models import load_model
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[45]:
+:END:
+
+Loading the model is then just a single function-call, as it should be.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model3 = load_model(path_model)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[46]:
+:END:
+
+We can then use the model again e.g. to make predictions. We get the first 9
+images from the test-set and their true class-numbers.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+images = data.test.images[0:9]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[47]:
+:END:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+cls_true = data.test.cls[0:9]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[48]:
+:END:
+
+We then use the restored model to predict the class-numbers for those images.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+y_pred = model3.predict(x=images)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[49]:
+:END:
+
+Get the class-numbers as integers.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+cls_pred = np.argmax(y_pred, axis=1)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[50]:
+:END:
+
+Plot the images with their true and predicted class-numbers.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_images(images=images,
+            cls_pred=cls_pred,
+            cls_true=cls_true)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[51]:
+[[file:./obipy-resources/6119-PN.png]]
+:END:
+
+
+** Visualization of Layer Weights
+*** Helper-function for plotting convolutional weights
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def plot_conv_weights(weights, input_channel=0):
+    # Get the lowest and highest values for the weights.
+    # This is used to correct the colour intensity across
+    # the images so they can be compared with each other.
+    w_min = np.min(weights)
+    w_max = np.max(weights)
+
+    # Number of filters used in the conv. layer.
+    num_filters = weights.shape[3]
+
+    # Number of grids to plot.
+    # Rounded-up, square-root of the number of filters.
+    num_grids = math.ceil(math.sqrt(num_filters))
+
+    # Create figure with a grid of sub-plots.
+    fig, axes = plt.subplots(num_grids, num_grids)
+
+    # Plot all the filter-weights.
+    for i, ax in enumerate(axes.flat):
+        # Only plot the valid filter-weights.
+        if i<num_filters:
+            # Get the weights for the i'th filter of the input channel.
+            # See new_conv_layer() for details on the format
+            # of this 4-dim tensor.
+            img = weights[:, :, input_channel, i]
+
+            # Plot image.
+            ax.imshow(img, vmin=w_min, vmax=w_max,
+                      interpolation='nearest', cmap='seismic')
+
+        # Remove ticks from the plot.
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Ensure the plot is shown correctly with multiple plots
+    # in a single Notebook cell.
+    plt.show()
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[52]:
+:END:
+
+*** Get Layers
+Keras has a simple way of *listing the layers in the model*.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model3.summary()
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[53]:
+:END:
+
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #
+=================================================================
+input_2 (InputLayer)         (None, 784)               0
+_________________________________________________________________
+reshape_2 (Reshape)          (None, 28, 28, 1)         0
+_________________________________________________________________
+layer_conv1 (Conv2D)         (None, 28, 28, 16)        416
+_________________________________________________________________
+max_pooling2d_3 (MaxPooling2 (None, 14, 14, 16)        0
+_________________________________________________________________
+layer_conv2 (Conv2D)         (None, 14, 14, 36)        14436
+_________________________________________________________________
+max_pooling2d_4 (MaxPooling2 (None, 7, 7, 36)          0
+_________________________________________________________________
+flatten_2 (Flatten)          (None, 1764)              0
+_________________________________________________________________
+dense_3 (Dense)              (None, 128)               225920
+_________________________________________________________________
+dense_4 (Dense)              (None, 10)                1290
+=================================================================
+Total params: 242,062
+Trainable params: 242,062
+Non-trainable params: 0
+_________________________________________________________________
+We count the indices to get the layers we want.
+
+The input-layer has index 0.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+layer_input = model3.layers[0]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[54]:
+:END:
+
+The first convolutional layer has index 2.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+layer_conv1 = model3.layers[2]
+layer_conv1
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[55]:
+: <tensorflow.python.keras._impl.keras.layers.convolutional.Conv2D at 0x7f7f8e0a9c88>
+:END:
+
+<tensorflow.python.keras._impl.keras.layers.convolutional.Conv2D at 0x7fc30c26cb70>
+
+The second convolutional layer has index 4.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+layer_conv2 = model3.layers[4]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[58]:
+:END:
+
+*** Get Layers Weights
+Now that we have the layers we can easily get their weights.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+weights_conv1 = layer_conv1.get_weights()[0] # '[0]' means we only get the 1st channel
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[59]:
+:END:
+
+This gives us a 4-rank tensor.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+weights_conv1.shape
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[62]:
+: (5, 5, 1, 16)
+:END:
+
+(5, 5, 1, 16)
+
+Plot the weights using the helper-function from above.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+  plot_conv_weights(weights=weights_conv1, input_channel=0)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[61]:
+[[file:./obipy-resources/6119LaT.png]]
+:END:
+
+We can also get the weights for the second convolutional layer and plot them.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+weights_conv2 = layer_conv2.get_weights()[0]
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[63]:
+:END:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_conv_weights(weights=weights_conv2, input_channel=0)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[64]:
+[[file:./obipy-resources/6119YkZ.png]]
+:END:
+
+
+** Visualization of Layer Outputs
+*** Helper-function for plotting the output of a convolutional layer
+
+    #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def plot_conv_output(values):
+    # Number of filters used in the conv. layer.
+    num_filters = values.shape[3]
+
+    # Number of grids to plot.
+    # Rounded-up, square-root of the number of filters.
+    num_grids = math.ceil(math.sqrt(num_filters))
+
+    # Create figure with a grid of sub-plots.
+    fig, axes = plt.subplots(num_grids, num_grids)
+
+    # Plot the output images of all the filters.
+    for i, ax in enumerate(axes.flat):
+        # Only plot the images for valid filters.
+        if i<num_filters:
+            # Get the output image of using the i'th filter.
+            img = values[0, :, :, i]
+
+            # Plot image.
+            ax.imshow(img, interpolation='nearest', cmap='binary')
+
+        # Remove ticks from the plot.
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    # Ensure the plot is shown correctly with multiple plots
+    # in a single Notebook cell.
+    plt.show()
+
+    #+END_SRC
+
+    #+RESULTS:
+    :RESULTS:
+    # Out[65]:
+    :END:
+
+*** Helper-function for plotting a single image.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def plot_image(image):
+    plt.imshow(image.reshape(img_shape),
+               interpolation='nearest',
+               cmap='binary')
+
+    plt.show()
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[66]:
+:END:
+
+Plot an image from the test-set which will be used as an example below.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+image1 = data.test.images[0]
+plot_image(image1)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[67]:
+[[file:./obipy-resources/6119luf.png]]
+:END:
+
+*** Get Layers - Method 1
+There are different ways of *getting the output of a layer* in a Keras model.
+This method uses a so-called ~K-function~ which turns *a part of the Keras model
+into a function*.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from tensorflow.python.keras import backend as K
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[68]:
+:END:
+
+This function is some like getting the intermedia variabes(other 2 kind of
+variabes are: model variables and placeholders), when you want to get the
+specific value, you must feed in the 'inputs' with specific ndarray.
+
+Here 'feed-in' for a function is 'call with parameters'.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+output_conv1 = K.function(inputs=[layer_input.input],
+                          outputs=[layer_conv1.output])
+#+END_SRC
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+print(type(output_conv1)) # <class 'tensorflow.python.keras._impl.keras.backend.Function'>
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[81]:
+:END:
+
+We can then call this function with the input image. Note that the image is
+wrapped in two lists because the function *expects an array of that
+dimensionality*. Likewise, *the function returns an array with one more
+dimensionality than we want so we just take the first element*.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+layer_output1 = output_conv1([[image1]])[0]
+layer_output1.shape
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[70]:
+: (1, 28, 28, 16)
+:END:
+
+(1, 28, 28, 16)
+
+We can then plot the output of all 16 channels of the convolutional layer.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_conv_output(values=layer_output1)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[71]:
+[[file:./obipy-resources/6119y4l.png]]
+:END:
+
+*** Get Layers - Method 2
+Keras also has another method for getting the output of a layer inside the
+model. This creates another Functional Model using the same input as the
+original model, but the output *is now taken from the convolutional layer that
+we are interested in*.
+
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+  output_conv2 = Model(inputs=layer_input.input,
+                       outputs=layer_conv2.output)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[75]:
+:END:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+  # print(type(output_conv1)) # <class 'tensorflow.python.keras._impl.keras.backend.Function'>
+  print (type(output_conv2)) # <class 'tensorflow.python.keras._impl.keras.engine.training.Model'>
+  print (type(layer_input))  # keras.engine.topology.InputLayer
+  print (type(layer_input.input)) # <class 'tensorflow.python.framework.ops.Tensor'>
+  print (type(layer_conv2))  # keras.layers.convolutional.Conv2D
+  print (type(layer_conv2.output)) # framework.ops.Tensor
+  output_conv2.summary()
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[84]:
+:END:
+
+
+This creates *a new model-object* where we can call the typical Keras functions.
+To get the output of the convoloutional layer we call the ~predict()~ function
+with the input image.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+layer_output2 = output_conv2.predict(np.array([image1]))
+layer_output2.shape
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[73]:
+: (1, 14, 14, 36)
+:END:
+
+(1, 14, 14, 36)
+
+We can then plot the images for all 36 channels.
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_conv_output(values=layer_output2)
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[74]:
+[[file:./obipy-resources/6119_Cs.png]]
+:END:
+
+*** Illustration - Method 2
+#+BEGIN_QUOTE
+.                                   ########################################################
+.   model3                          # Model(inputs, outputs)                               #
+.                                   # will get the *chain line* between inputs and outputs #
+.                                   # not only the *two points* inputs and outputs         #
+.                                   ########################################################
+.   _____________________________
+.   Layer (type)
+.   =============================    --
+.   input_2 (InputLayer)             ||<--- inputs
+.   _____________________________    ||
+.   reshape_2 (Reshape)              ||
+.   _____________________________    || ===> model_new
+.   layer_conv1 (Conv2D)             ||
+.   _____________________________    ||
+.   max_pooling2d_3 (MaxPooling2     ||
+.   _____________________________    ||
+.   layer_conv2 (Conv2D)             ||<--- outputs
+.   _____________________________    --
+.   max_pooling2d_4 (MaxPooling2
+.   _____________________________
+.   flatten_2 (Flatten)
+.   _____________________________
+.   dense_3 (Dense)
+.   _____________________________
+.   dense_4 (Dense)
+
+#+END_QUOTE
+
+** Conclusion
+This tutorial showed how to use the so-called ~Keras API~ for easily building
+Convolutional Neural Networks in TensorFlow. Keras is by far the most complete
+and best designed API for TensorFlow.
+
+This tutorial also showed how to use Keras to save and load a model, as well as
+getting the weights and outputs of convolutional layers.
+
+It seems likely that Keras will be the standard API for TensorFlow in the
+future, for the simple reason that is already very good and it is constantly
+being improved. So it is recommended that you use Keras.
+
+*** Exercises
+These are a few suggestions for exercises that may help improve your skills with
+TensorFlow. It is important to get hands-on experience with TensorFlow in order
+to learn how to use it properly.
+
+You may want to backup this Notebook before making any changes.
+
+#+BEGIN_QUOTE
+- Train for more epochs. Does it improve the classification accuracy?
+- Change the activation function to sigmoid for some of the layers.
+- Can you find a simple way of changing the activation function for all the layers?
+- Plot the output of the max-pooling layers instead of the conv-layers.
+- Replace the 2x2 max-pooling layers with stride=2 in the convolutional layers. Is there a difference in classification accuracy? What if you optimize it again and again? The difference is random, so how would you measure if there really is a difference? What are the pros and cons of using max-pooling vs. stride in the conv-layer?
+- Change the parameters for the layers, e.g. the kernel, depth, size, etc. What is the difference in time usage and classification accuracy?
+- Add and remove some convolutional and fully-connected layers.
+- What is the simplest network you can design that still performs well?
+- Change the Functional Model so it has another convolutional layer that connects in parallel to the existing conv-layers before going into the dense layers.
+- Change the Functional Model so it outputs the predicted class both as a One-Hot encoded array and as an integer, so we don't have to use numpy.argmax() afterwards.
+- Remake the program yourself without looking too much at this source-code.
+- Explain to a friend how the program works.
+#+END_QUOTE
+
+from tensorflow.python.keras.models import Sequential
+from tensorflow.python.keras.layers import InputLayer, Input
+from tensorflow.python.keras.layers import Reshape, MaxPooling2D
+from tensorflow.python.keras.layers import Conv2D, Dense, Flatten
+
+* Misc
+** tensorflow
+*** module by now
+    #+BEGIN_QUOTE
+1. from tensorflow.python.keras.models import Sequential
+2. from tensorflow.python.keras.layers import InputLayer, Input
+3. from tensorflow.python.keras.layers import Reshape, MaxPooling2D
+4. from tensorflow.python.keras.layers import Conv2D, Dense, Flatten
+5. from tensorflow.python.keras.optimizers import Adam
+6. from tensorflow.python.keras.models import load_model
+7. from tensorflow.python.keras import backend as K
+
+
+
+    #+END_QUOTE
+*** fn by now
+#+BEGIN_QUOTE
+1. layer = tf.nn.conv2d(input=input, filter=weights, strides=[1, 1, 1, 1], padding='SAME')
+2. layer = tf.nn.max_pool(value=layer, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
+3. layer = tf.nn.relu(layer)
+4. layer_flat = tf.reshape(layer, [-1, num_features])
+5. layer = tf.matmul(input, weights) + biases
+6. activation_fn=tf.nn.relu
+7. pt.defaults_scope(activation_fn=tf.nn.relu)
+8. net = tf.layers.conv2d(inputs=net, name='layer_conv1', padding='same', filters=16, kernel_size=5, activation=tf.nn.relu)
+9. net = tf.layers.conv2d(inputs=net, name='layer_conv2', padding='same', filters=36, kernel_size=5, activation=tf.nn.relu)
+10. net = tf.layers.dense(inputs=net, name='layer_fc1', units=128, activation=tf.nn.relu) // fully connected
+11. net = tf.layers.dense(inputs=net, name='layer_fc_out', units=num_classes, activation=None)
+12. y_pred = tf.nn.softmax(logits=logits)
+13. y_pred_cls = tf.argmax(y_pred, dimension=1)
+14. for var in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES): print(var)
+15. with tf.variable_scope(layer_name, reuse=True): variable = tf.get_variable('kernel')
+16. weights_conv1 = get_weights_variable(layer_name='layer_conv1')
+
+keras
+---------------------------------
+1. model = Sequential()
+2. model.add(InputLayer(input_shape=(img_size_flat,)))
+3. model.add(Reshape(img_shape_full))
+4. model.add(Conv2D(kernel_size=5, strides=1, filters=16, padding='same', activation='relu', name='layer_conv1'))
+5. model.add(MaxPooling2D(pool_size=2, strides=2))
+6. model.add(Conv2D(kernel_size=5, strides=1, filters=36, padding='same', activation='relu', name='layer_conv2'))
+7. model.add(MaxPooling2D(pool_size=2, strides=2))
+8. model.fit(x=data.train.images, y=data.train.labels, epochs=1, batch_size=128)
+9. optimizer = Adam(lr=1e-3)
+10. model.compile(optimizer=optimizer, loss='categorical_crossentropy', metrics=['accuracy'])
+11. model.fit(x=data.train.images, y=data.train.labels, epochs=1, batch_size=128)
+12. result = model.evaluate(x=data.test.images, y=data.test.labels)
+13. for name, value in zip(model.metrics_names, result): print(name, value)
+14. inputs = Input(shape=(img_size_flat,))
+15. model2 = Model(inputs=inputs, outputs=outputs)
+16. model2.compile(optimizer='rmsprop', loss='categorical_crossentropy', metrics=['accuracy'])
+
+
+save & restore
+--------------------------------
+1. model2.save(path_model)
+2. del model2
+3. model3 = load_model(path_model)
+4. images = data.test.images[0:9]
+5. cls_true = data.test.cls[0:9]
+6. y_pred = model3.predict(x=images)
+7. cls_pred = np.argmax(y_pred, axis=1)
+8. plot_images(images=images, cls_pred=cls_pred, cls_true=cls_true)
+9. model3.summary() ### visualize the NN architecture
+10. weights_conv1 = layer_conv1.get_weights()[0]
+11. layer_conv2 = model3.layers[4]
+
+get output of layer
+--------------------------------
+1. from tensorflow.python.keras import backend as K
+2. output_conv1 = K.function(inputs=[layer_input.input], outputs=[layer_conv1.output])
+3. output_conv2 = Model(inputs=layer_input.input, outputs=layer_conv2.output)
+4. layer_output1 = output_conv1([ [image1] ])[0]
+5. layer_output2 = output_conv2.predict(np.array([image1]))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#+END_QUOTE

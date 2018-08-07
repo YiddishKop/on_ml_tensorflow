@@ -1,0 +1,464 @@
+
+
+#+TITLE: TensorFlow Tutorial #07
+
+* Inception Model
+​
+*** Introduction
+This tutorial shows how to use a *pre-trained Deep Neural Network* called
+*Inception v3* for image classification.
+
+The Inception v3 model takes weeks to train on a monster computer with *8 Tesla
+K40 GPUs and probably costing $30,000*, so it is impossible to train it on an
+ordinary PC. We will instead *download the pre-trained Inception model* and use
+it to classify images.
+
+The Inception v3 model has nearly
+
+- *25 million parameters*
+- *5 billion multiply-add operations*
+
+for classifying a single image. On a modern PC without a GPU this can be done in
+a fraction of a second per image.
+
+This tutorial hides the TensorFlow code so it may not require much experience
+with TensorFlow, although a basic understanding of TensorFlow from the previous
+tutorials might be helpful, especially if you want to study the implementation
+details in the inception.py file.
+
+*** Flowchart
+The following chart shows how the data flows in the Inception v3 model, which is
+a Convolutional Neural Network with many layers and a complicated structure. The
+research paper gives more details on how the Inception model is constructed and
+why it is designed that way. But the authors admit that they don't fully
+understand why it works.
+
+Note that the Inception model has two softmax-outputs. One is used during
+training of the neural network and the other is used for classifying images
+after training has finished, also known as inference.
+
+Newer models became available just last week, which are even more complicated
+than Inception v3 and achieve somewhat better classification accuracy.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+from IPython.display import Image, display
+Image('images/07_inception_flowchart.png')
+#+END_SRC
+
+
+#+RESULTS:
+:RESULTS:
+# Out[1]:
+[[file:./obipy-resources/6119Mba.png]]
+:END:
+
+*** Imports
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+%matplotlib inline
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import numpy as np
+import os
+
+# Functions and classes for loading and using the Inception model.
+import inception
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[3]:
+:END:
+
+This was developed using Python 3.5.2 (Anaconda) and TensorFlow version:
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+tf.__version__
+#+END_SRC
+'1.1.0'
+
+*** Download the Inception Model
+The Inception model is downloaded from the internet. This is the default
+directory where you want to save the data-files. The directory will be created
+if it does not exist.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+inception.data_dir = 'inception/'
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[5]:
+:END:
+
+Download the data for the Inception model if it doesn't already exist in the
+directory. It is 85 MB.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+inception.maybe_download()
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+0 - 41ada235-753d-4889-a2f1-625517538f1e
+:END:
+
+Downloading Inception v3 Model ...
+
+Data has apparently already been downloaded and unpacked.
+
+*** Load the Inception Model
+Load the Inception model so it is ready for classifying images.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+model = inception.Inception()
+#+END_SRC
+
+*** Helper-function for classifying and plotting images
+This is a simple wrapper-function for displaying the image, then classifying it
+using the Inception model and finally printing the classification scores.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def classify(image_path):
+    # Display the image.
+    display(Image(image_path))
+
+    # Use the Inception model to classify the image.
+    pred = model.classify(image_path=image_path)
+
+    # Print the scores and names for the top-10 predictions.
+    model.print_scores(pred=pred, k=10, only_first_name=True)
+#+END_SRC
+
+*** Panda
+This image of a panda is included in the Inception data-file. The Inception
+model is quite confident that this image shows a panda, with a classification
+score of about 89% and the next highest score being only about 0.8% for an
+indri, which is another exotic animal.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+image_path = os.path.join(inception.data_dir, 'cropped_panda.jpg')
+classify(image_path)
+#+END_SRC
+
+89.11% : giant panda
+ 0.78% : indri
+ 0.30% : lesser panda
+ 0.15% : custard apple
+ 0.12% : earthstar
+ 0.09% : sea urchin
+ 0.05% : forklift
+ 0.05% : digital watch
+ 0.05% : gibbon
+ 0.05% : go-kart
+
+*** Interpretation of Classification Scores
+*The output of the Inception model is a so-called Softmax-function* which was
+also used in the *neural networks* in the previous tutorials.
+
+*The softmax-outputs are sometimes called probabilities* because they are
+between zero and one, and they also sum to one - just like probabilities. But
+they are actually not probabilities in the traditional sense of the word,
+because they do not come from repeated experiments.
+
+It is perhaps better to call the output values of a neural network for
+*classification scores or ranks*, because they indicate how strongly the network
+*believes* that the input image is of each possible class.
+
+In the above example with the image of a panda, the Inception model gave a very
+high score of about 89% for the panda-class, and the scores for the remaining
+999 possible classes were all below 1%. This means the Inception model was quite
+certain that the image showed a panda and the remaining scores below 1% should
+be regarded as noise. For example, the 8th highest score was 0.05% for a digital
+watch, but this is probably more due to the imprecise nature of neural networks
+rather than an indication that the image looked slightly like a digital watch.
+
+Sometimes the Inception model is confused about which class an image belongs to,
+so none of the scores are really high. Examples of this are shown below.
+
+*** Parrot (Original Image)
+The Inception model is very confident (score about 97%) that this image shows a
+kind of parrot called a macaw.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/parrot.jpg")
+#+END_SRC
+
+97.18% : macaw
+ 0.07% : African grey
+ 0.06% : toucan
+ 0.05% : jacamar
+ 0.04% : bee eater
+ 0.03% : lorikeet
+ 0.02% : sulphur-crested cockatoo
+ 0.02% : jay
+ 0.01% : kite
+ 0.01% : indigo bunting
+
+*** Parrot (Resized Image)
+The Inception model works on input images that are 299 x 299 pixels in size. The
+above image of a parrot is actually 320 pixels wide and 785 pixels high, so it
+is resized automatically by the Inception model.
+
+We now want to see the image after it has been resized by the Inception model.
+
+First we have a helper-function for getting the resized image from inside the
+Inception model.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+def plot_resized_image(image_path):
+    # Get the resized image from the Inception model.
+    resized_image = model.get_resized_image(image_path=image_path)
+
+    # Plot the image.
+    plt.imshow(resized_image, interpolation='nearest')
+
+    # Ensure that the plot is shown.
+    plt.show()
+#+END_SRC
+
+Now plot the resized image of the parrot. This is the image that is actually
+input to the neural network of the Inception model. We can see that it has been
+squeezed so it is square, and the resolution has been reduced so the image has
+become more pixelated and grainy.
+
+In this case the image still clearly shows a parrot, but some images may become
+so distorted from this naive resizing that you may want to resize the images
+yourself before inputting them to the Inception model.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_resized_image(image_path="images/parrot.jpg")
+#+END_SRC
+
+*** Parrot (Cropped Image, Top)
+This image of the parrot has been cropped manually to 299 x 299 pixels and then
+input to the Inception model, which is still very confident (score about 97%)
+that it shows a parrot (macaw).
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/parrot_cropped1.jpg")
+#+END_SRC
+
+97.52% : macaw
+ 0.09% : African grey
+ 0.03% : sulphur-crested cockatoo
+ 0.02% : toucan
+ 0.02% : reflex camera
+ 0.01% : comic book
+ 0.01% : backpack
+ 0.01% : bib
+ 0.01% : vulture
+ 0.01% : lens cap
+
+*** Parrot (Cropped Image, Middle)
+This is another crop of the parrot image, this time showing its body without the
+head or tail. The Inception model is still very confident (score about 94%) that
+it shows a macaw parrot.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/parrot_cropped2.jpg")
+#+END_SRC
+
+94.21% : macaw
+ 0.76% : toucan
+ 0.58% : African grey
+ 0.11% : jacamar
+ 0.10% : sulphur-crested cockatoo
+ 0.10% : bee eater
+ 0.09% : magpie
+ 0.08% : jay
+ 0.06% : lorikeet
+ 0.04% : hornbill
+
+*** Parrot (Cropped Image, Bottom)
+This image has been cropped so it only shows the tail of the parrot. Now the
+Inception model is quite confused and thinks the image might show a jacamar
+(score about 26%) which is another exotic bird, or perhaps the image shows a
+grass-hopper (score about 10%).
+
+The Inception model also thinks the image might show a fountain-pen (score about
+2%). But this is a very low score and should be interpreted as unreliable noise.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/parrot_cropped3.jpg")
+#+END_SRC
+
+26.51% : jacamar
+10.56% : grasshopper
+ 3.58% : chime
+ 2.15% : bulbul
+ 1.93% : fountain pen
+ 1.64% : leafhopper
+ 1.31% : kite
+ 1.22% : cricket
+ 1.09% : macaw
+ 0.81% : bee eater
+
+*** Parrot (Padded Image)
+The best way to input images to this Inception model, is to pad the image so it
+is square and then resize the image to 299 x 299 pixels, like this example of
+the parrot which is classified correctly with a score of about 97%.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/parrot_padded.jpg")
+#+END_SRC
+
+96.87% : macaw
+ 0.06% : African grey
+ 0.06% : toucan
+ 0.05% : bee eater
+ 0.04% : sulphur-crested cockatoo
+ 0.03% : king penguin
+ 0.03% : jacamar
+ 0.03% : lorikeet
+ 0.01% : kite
+ 0.01% : anemone fish
+
+*** Elon Musk (299 x 299 pixels)
+This image shows the living legend and super-nerd-hero Elon Musk. But the
+Inception model is very confused about what the image shows, predicting that it
+maybe shows a sweatshirt (score about 17%) or an abaya (score about 16%). It
+also thinks the image might show a ping-pong ball (score about 3%) or a baseball
+(score about 2%). So the Inception model is confused and the classification
+scores are unreliable.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/elon_musk.jpg")
+#+END_SRC
+
+16.63% : sweatshirt
+16.45% : abaya
+ 4.62% : suit
+ 3.40% : ping-pong ball
+ 2.89% : trench coat
+ 2.37% : baseball
+ 2.31% : cellular telephone
+ 1.99% : jersey
+ 1.42% : water bottle
+ 1.34% : dumbbell
+
+*** Elon Musk (100 x 100 pixels)
+If we instead use a 100 x 100 pixels image of Elon Musk, then the Inception
+model thinks it might show a sweatshirt (score about 22%) or a cowboy boot
+(score about 14%). So now the Inception model has somewhat different predictions
+but it is still very confused.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/elon_musk_100x100.jpg")
+#+END_SRC
+
+21.65% : sweatshirt
+14.51% : cowboy boot
+ 9.11% : abaya
+ 8.70% : balance beam
+ 5.92% : suit
+ 5.65% : Loafer
+ 3.66% : trench coat
+ 1.75% : maillot
+ 1.44% : jersey
+ 1.44% : unicycle
+
+The Inception model automatically upscales this image from 100 x 100 to 299 x
+299 pixels, which is shown here. Note how pixelated and grainy it really is,
+although a human can easily see that this is a picture of a man with crossed
+arms.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+plot_resized_image(image_path="images/elon_musk_100x100.jpg")
+#+END_SRC
+
+*** Willy Wonka (Gene Wilder)
+This image shows the actor Gene Wilder portraying Willy Wonka in the 1971
+version of the movie. The Inception model is very confident that the image shows
+a *bow tie* (score about 98%), which is true but a human would probably say this
+image shows a person.
+
+The reason might be that the Inception model was trained on images of people
+with bow-ties that were classified as a bow-tie rather than a person. So maybe
+the problem is that the class-name should be "person with bow-tie" instead of
+just "bow-tie".
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/willy_wonka_old.jpg")
+#+END_SRC
+
+97.98% : bow tie
+ 0.63% : cowboy hat
+ 0.14% : sombrero
+ 0.07% : suit
+ 0.05% : bolo tie
+ 0.04% : Windsor tie
+ 0.03% : cornet
+ 0.02% : flute
+ 0.02% : banjo
+ 0.01% : revolver
+
+*** Willy Wonka (Johnny Depp)
+This image shows the actor Johnny Depp portraying Willy Wonka in the 2005
+version of the movie. The Inception model thinks that this image shows
+"sunglasses" (score about 34%) or "sunglass" (score about 18%). Actually, the
+full name of the first class is "sunglasses, dark glasses, shades". For some
+reason the Inception model has been trained to recognize two very similar
+classes for sunglasses. Once again, it is correct that the image shows
+sunglasses, but a human would probably have said that this image shows a person.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+classify(image_path="images/willy_wonka_new.jpg")
+#+END_SRC
+
+34.47% : sunglasses
+18.10% : sunglass
+ 1.29% : velvet
+ 0.95% : wig
+ 0.85% : cowboy hat
+ 0.72% : sombrero
+ 0.64% : seat belt
+ 0.50% : jean
+ 0.44% : stole
+ 0.41% : poncho
+
+*** Close TensorFlow Session
+We are now done using TensorFlow, so we close the session to release its
+resources. Note that the TensorFlow-session is inside the model-object, so we
+close the session through that object.
+
+#+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
+# This has been commented out in case you want to modify and experiment
+# with the Notebook without having to restart it.
+# model.close()
+
+#+END_SRC
+
+*** Conclusion
+This tutorial showed how to use the pre-trained Inception v3 model. It takes
+several weeks for a monster-computer to train the Inception model, but we can
+just download the finished model from the internet and use it on a normal PC for
+classifying images.
+
+Unfortunately, the Inception model appears to have problems recognizing people.
+This may be due to the training-set that was used. Newer versions of the
+Inception model have already been released, but they are probably also trained
+on the same data-set and may therefore also have problems recognizing people.
+Future models will hopefully be trained to recognize common objects such as
+people.
+
+In this tutorial we have hidden the TensorFlow implementation in the
+inception.py file because it is a bit messy and we may want to re-use it in
+future tutorials. Hopefully the TensorFlow developers will standardize and
+simplify the API for loading these pre-trained models more easily, so that
+anyone can use a powerful image classifier with just a few lines of code.
+
+*** Exercises
+These are a few suggestions for exercises that may help improve your skills with
+TensorFlow. It is important to get hands-on experience with TensorFlow in order
+to learn how to use it properly.
+
+You may want to backup this Notebook and the other files before making any
+changes.
+
+#+BEGIN_QUOTE
+Use your own images, or images you find on the internet.
+Crop, resize and distort the images to see how it affects the classification accuracy.
+Add print-statements to various places in the code to see what data is being passed around in the code. You can also run and debug the inception.py file directly.
+Try and use one of the newer models that were just released. These are loaded in a different way than the Inception v3 model and may be more challenging to implement.
+Explain to a friend how the program works.
+#+END_QUOTE

@@ -1,0 +1,1432 @@
+#+TITLE: TensorFlow Tutorial #21
+
+* Machine Translation
+*** Introduction
+Tutorial #20 showed how to use a Recurrent Neural Network (RNN) to do so-called
+sentiment analysis on texts of movie reviews. This tutorial will extend that
+idea to do Machine Translation of human languages by combining two RNN's.
+
+You should be familiar with TensorFlow, Keras and the basics of Natural Language
+Processing, see Tutorials #01, #03-C and #20.
+
+*** Flowchart
+The following flowchart shows roughly how the neural network is constructed. It
+is split into two parts:
+
+An *encoder* which maps the source-text to a "thought vector" that summarizes
+the text's contents, which is then input to
+
+the second part of the neural network that decodes the "thought vector" to the
+destination-text.
+
+The neural network cannot work *directly on text* so first we need to convert
+each word to an integer-token using a tokenizer. But the neural network cannot
+work *on integers* either, so we use a so-called *Embedding Layer* to convert
+each integer-token to a vector of floating-point values. The embedding is
+trained alongside the rest of the neural network to map words with similar
+semantic meaning to similar vectors of floating-point values.
+
+*** 以丹麦语到英语为例解释RNN机器翻译
+For example, consider the Danish(丹麦语) text *"der var engang"* which is the
+beginning of any fairytale and literally means "there was once" but is commonly
+translated into English as *"once upon a time"*.
+
+We first convert the entire data-set to integer-tokens so the text "der var
+engang" becomes [12, 54, 1097]. Each of these integer-tokens is then mapped to
+an embedding-vector with e.g. 128 elements, so the
+
+- integer-token 12 could for example become [0.12, -0.56, ..., 1.19]
+- integer-token 54 could for example become [0.39, 0.09, ..., -0.12].
+
+These embedding-vectors can then be input to the Recurrent Neural Network, which
+has 3 GRU-layers. See Tutorial #20 for a more detailed explanation.
+
+The last GRU-layer outputs a single vector - the *"thought vector"* that
+summarizes the contents of the source-text - which is then used as the initial
+state of the GRU-units in the decoder-part.
+
+The destination-text *"once upon a time"* is padded with special markers
+*"ssss"* and *"eeee"* to indicate its beginning and end, so the sequence of
+integer-tokens becomes *[2, 337, 640, 9, 79, 3]*.
+
+During training, the decoder will be given this entire sequence as input and the
+desired output sequence is [337, 640, 9, 79, 3] which is the same sequence but
+time-shifted one step.
+
+#+BEGIN_QUOTE
+We are trying to teach the decoder to map the "thought vector" and the
+start-token "ssss" (integer 2) to the next word "once" (integer 337), and then
+map the word "once" to the word "upon" (integer 640), and so forth.
+#+END_QUOTE
+#+BEGIN_EXAMPLE
+thought vector + |ssss ---+
+                          |
+                 |once <--+
+
+                 |upon
+
+                 |a
+
+                 |time
+
+                 |eeee
+
+#+END_EXAMPLE
+
+This flow-chart depicts the main idea but does not show all the necessary
+details e.g. regarding the loss function which is also somewhat complicated.
+
+
+file:images/21_machine_translation_flowchart.png
+
+** 实际编程开始
+** 数据预处理
+*** Imports
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+  %matplotlib inline
+  import matplotlib.pyplot as plt
+  import tensorflow as tf
+  import numpy as np
+  import math
+  import os
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+2 - b0022cea-5dd7-4749-8baf-5592f2fcb55a
+:END:
+
+/home/magnus/anaconda3/envs/tf-gpu/lib/python3.6/site-packages/h5py/__init__.py:36:
+FutureWarning: Conversion of the second argument of issubdtype from `float` to
+`np.floating` is deprecated. In future, it will be treated as `np.float64 ==
+np.dtype(float).type`.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+from ._conv import register_converters as _register_converters
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+0 - 486ce335-b7a8-4092-a3c5-a6cbba398854
+:END:
+
+We need to import several things from Keras.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+# from tf.keras.models import Model  # This does not work!
+from tensorflow.python.keras.models import Model
+from tensorflow.python.keras.layers import Input, Dense, GRU, Embedding
+from tensorflow.python.keras.optimizers import RMSprop
+from tensorflow.python.keras.callbacks import EarlyStopping, ModelCheckpoint, TensorBoard
+from tensorflow.python.keras.preprocessing.text import Tokenizer
+from tensorflow.python.keras.preprocessing.sequence import pad_sequences
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[4]:
+:END:
+
+This was developed using Python 3.6 (Anaconda) and package versions:
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tf.__version__
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[5]:
+: '1.6.0'
+:END:
+
+'1.5.0'
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tf.keras.__version__
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[9]:
+: '2.1.3-tf'
+:END:
+
+'2.1.2-tf'
+
+*** Load Data
+We will use the Europarl data-set which has sentence-pairs in most European
+languages. The data was created by the European Union which translates a lot of
+their communications to the languages of the member-countries of the European
+Union.
+
+http://www.statmt.org/europarl/
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+  import europarl
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+0 - c4fcc074-24e9-46e7-9ea5-2e112134cc2e
+:END:
+
+In this tutorial I have used the *English-Danish* data-set which contains about
+2 million sentence-pairs. You can use another language by changing this
+language-code, see europarl.py for a list of available language-codes.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+language_code='da'
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[11]:
+:END:
+
+In order for the decoder to know when to begin and end a sentence, we need to
+mark the start and end of each sentence with words that most likely don't occur
+in the data-set.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+mark_start = 'ssss '
+mark_end = ' eeee'
+#+END_SRC
+
+#+RESULTS:
+:RESULTS:
+# Out[12]:
+:END:
+
+You can change the directory for the data-files if you like.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+# data_dir = "data/europarl/"
+#+END_SRC
+This will automatically download and extract the data-files if you don't have
+them already.
+
+WARNING: The file for the English-Danish data-set is about 587 MB!
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+europarl.maybe_download_and_extract(language_code=language_code)
+#+END_SRC
+
+Data has apparently already been downloaded and unpacked.
+Load the texts for the source-language, here we use Danish.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_src = europarl.load_data(english=False,
+                              language_code=language_code)
+#+END_SRC
+
+Load the texts for the destination-language, here we use English.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_dest = europarl.load_data(english=True,
+                               language_code=language_code,
+                               start=mark_start,
+                               end=mark_end)
+#+END_SRC
+
+We will build a model to translate from the source language (Danish) to the
+destination language (English). If you want to make the inverse translation you
+can merely exchange the source and destination data.
+
+*** Example Data
+The data is just a list of texts that is ordered so the source and destination
+texts match. I can confirm that this example is an accurate translation.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 2
+#+END_SRC
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_src[idx]
+#+END_SRC
+'Som De kan se, indfandt det store "år 2000-problem" sig ikke. Til gengæld har
+borgerne i en del af medlemslandene været ramt af meget forfærdelige
+naturkatastrofer.'
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_dest[idx]
+#+END_SRC
+"ssss Although, as you will have seen, the dreaded 'millennium bug' failed to
+materialise, still the people in a number of countries suffered a series of
+natural disasters that truly were dreadful. eeee"
+
+*** Error in Data
+The data-set contains about 2 million sentence-pairs. Some of the data is
+incorrect. This example appears to be French (or some other weird language I
+don't understand), although the Danish text is also included.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 8002
+#+END_SRC
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_src[idx]
+#+END_SRC
+'"Car il savait ce que cette foule en joie ignorait, et qu\'on peut lire dans
+les livres, que le bacille de la peste ne meurt ni ne disparaît jamais, qu\'il
+peut rester pendant des dizaines d\'années endormi dans les meubles et le linge,
+qu\'il attend patiemment dans les chambres, les caves, les malles, les mouchoirs
+et les paperasses, et que, peut-être, le jour viendrait où, pour le malheur et
+l\'enseignement des hommes, la peste réveillerait ses rats et les enverrait
+mourir dans une cité heureuse." (Thi han vidste det, som denne glade forsamling
+ikke vidste, og som man kan læse i bøger, at pestens bacille aldrig dør og
+aldrig forsvinder, at den kan sove i mange år i møbler og linned, at den venter
+tålmodigt i kamre, kældre, kufferter, lommetørklæder og papirer, og at den dag
+måske kommer, hvor pesten til menneskenes skade og oplysning vågner sine rotter
+og sender dem ud for at dø i en lykkelig by.)'
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_dest[idx]
+#+END_SRC
+'ssss "He knew what those jubilant crowds did not know but could have learned
+from books: that the plague bacillus never dies or disappears for good; that it
+can lie dormant for years and years in furniture and linen-chests; that it bides
+its time in bedrooms, cellars, trunks, and bookshelves; and that perhaps the day
+would come when, for the bane and the enlightening of men, it would rouse up its
+rats again and send them forth to die in a happy city." eeee'
+
+*** Tokenizer
+Neural Networks cannot work directly on text-data. We use a two-step process to
+convert text into numbers that can be used in a neural network. The first step
+is to convert text-words into so-called integer-tokens. The second step is to
+convert integer-tokens into vectors of floating-point numbers using a so-called
+embedding-layer. See Tutorial #20 for a more detailed explanation.
+
+Set the maximum number of words in our vocabulary. This means that we will only
+use e.g. the 10000 most frequent words in the data-set. We use the same number
+for both the source and destination languages, but these could be different.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+num_words = 10000
+#+END_SRC
+We need a few more functions than provided by Keras' Tokenizer-class so we wrap
+it.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+class TokenizerWrap(Tokenizer):
+    """Wrap the Tokenizer-class from Keras with more functionality."""
+
+    def __init__(self, texts, padding,
+                 reverse=False, num_words=None):
+        """
+        :param texts: List of strings. This is the data-set.
+        :param padding: Either 'post' or 'pre' padding.
+        :param reverse: Boolean whether to reverse token-lists.
+        :param num_words: Max number of words to use.
+        """
+​
+        Tokenizer.__init__(self, num_words=num_words)
+​
+        # Create the vocabulary from the texts.
+        self.fit_on_texts(texts)
+​
+        # Create inverse lookup from integer-tokens to words.
+        self.index_to_word = dict(zip(self.word_index.values(), # word
+                                      self.word_index.keys()))  # index
+​
+        # Convert all texts to lists of integer-tokens.
+        # Note that the sequences may have different lengths.
+        self.tokens = self.texts_to_sequences(texts)
+​
+        if reverse:
+            # Reverse the token-sequences.
+            self.tokens = [list(reversed(x)) for x in self.tokens]
+
+            # Sequences that are too long should now be truncated
+            # at the beginning, which corresponds to the end of
+            # the original sequences.
+            truncating = 'pre'
+        else:
+            # Sequences that are too long should be truncated
+            # at the end.
+            truncating = 'post'
+​
+        # The number of integer-tokens in each sequence.
+        self.num_tokens = [len(x) for x in self.tokens]
+​
+        # Max number of tokens to use in all sequences.
+        # We will pad / truncate all sequences to this length.
+        # This is a compromise so we save a lot of memory and
+        # only have to truncate maybe 5% of all the sequences.
+        self.max_tokens = np.mean(self.num_tokens) \
+                          + 2 * np.std(self.num_tokens)
+        self.max_tokens = int(self.max_tokens)
+​
+        # Pad / truncate all token-sequences to the given length.
+        # This creates a 2-dim numpy matrix that is easier to use.
+        self.tokens_padded = pad_sequences(self.tokens,
+                                           maxlen=self.max_tokens,
+                                           padding= padding,
+                                           truncating= truncating)
+​
+    def token_to_word(self, token):
+        """Lookup a single word from an integer-token."""
+​
+        word = " " if token == 0 else self.index_to_word[token]
+        return word
+​
+    def tokens_to_string(self, tokens):
+        """Convert a list of integer-tokens to a string."""
+​
+        # Create a list of the individual words.
+        words = [self.index_to_word[token]
+                 for token in tokens
+                 if token != 0]
+
+        # Concatenate the words to a single string
+        # with space between all the words.
+        text = " ".join(words)
+​
+        return text
+
+    def text_to_tokens(self, text, reverse=False, padding=False):
+        """
+        Convert a single text-string to tokens with optional
+        reversal and padding.
+        """
+​
+        # Convert to tokens. Note that we assume there is only
+        # a single text-string so we wrap it in a list.
+        tokens = self.texts_to_sequences([text])
+        tokens = np.array(tokens)
+​
+        if reverse:
+            # Reverse the tokens.
+            tokens = np.flip(tokens, axis=1)
+​
+            # Sequences that are too long should now be truncated
+            # at the beginning, which corresponds to the end of
+            # the original sequences.
+            truncating = 'pre'
+        else:
+            # Sequences that are too long should be truncated
+            # at the end.
+            truncating = 'post'
+​
+        if padding:
+            # Pad and truncate sequences to the given length.
+            tokens = pad_sequences(tokens,
+                                   maxlen=self.max_tokens,
+                                   padding='pre',
+                                   truncating=truncating)
+​
+        return tokens
+#+END_SRC
+
+Now create a *tokenizer* for the source-language. Note that we *pad zeros at the
+beginning ('pre') of the sequences*.
+
+*** 为什么对encoder中的token倒序
+#+BEGIN_QUOTE
+We also *reverse* the sequences of tokens because the research literature
+suggests(论文中建议) that this might improve performance, because the last words
+seen by the encoder match the first words produced by the decoder, so *short-term*
+dependencies are supposedly modelled more accurately.
+#+END_QUOTE
+
+*** 对源语言tokenize
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+  %%time
+  tokenizer_src = TokenizerWrap(texts=data_src,
+                                padding='pre',
+                                reverse=True,
+                                num_words=num_words)
+#+END_SRC
+
+CPU times: user 2min 17s, sys: 608 ms, total: 2min 17s
+Wall time: 2min 17s
+
+Now create the tokenizer for the destination language. We need a tokenizer for
+both the source- and destination-languages because their vocabularies are
+different. Note that this tokenizer does not reverse the sequences and it pads
+zeros at the end ('post') of the arrays.
+
+*** 对目标语言tokenize
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+%%time
+tokenizer_dest = TokenizerWrap(texts=data_dest,
+                               padding = 'post',
+                               reverse = False,
+                               num_words=num_words)
+#+END_SRC
+CPU times: user 1min 42s, sys: 492 ms, total: 1min 42s
+Wall time: 1min 42s
+
+*** padding and truncating
+Define convenience variables for the padded token sequences. These are just
+2-dimensional numpy arrays of integer-tokens.
+
+Note that the sequence-lengths are different for the source and destination
+languages. This is because texts with the same meaning may have different
+numbers of words in the two languages.
+
+Furthermore, we have made a compromise when tokenizing the original texts in
+order to save a lot of memory. This means we only truncate about 5% of the
+texts.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokens_src = tokenizer_src.tokens_padded
+tokens_dest = tokenizer_dest.tokens_padded
+print(tokens_src.shape)
+print(tokens_dest.shape)
+#+END_SRC
+(1968800, 47)
+(1968800, 55)
+
+*** start 标记
+This is the integer-token used to mark the beginning of a text in the
+destination-language.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+token_start = tokenizer_dest.word_index[mark_start.strip()]
+token_start
+#+END_SRC
+2
+
+*** end 标记
+This is the integer-token used to mark the end of a text in the
+destination-language.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+token_end = tokenizer_dest.word_index[mark_end.strip()]
+token_end
+#+END_SRC
+3
+
+*** Example of Token Sequences
+This is the output of the tokenizer. Note how it is padded with zeros at the
+beginning (pre-padding).
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 2
+#+END_SRC
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokens_src[idx]
+#+END_SRC
+array([   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0, 3069,
+       3374,   43,    7, 1386,  108, 1995,    7,  178,    9,    3,  302,
+         19, 2076,    8,   20,   39,  285,  499,   69,  136,    5,  166,
+         24,   10,   13], dtype=int32)
+
+We can reconstruct the original text by converting each integer-token back to
+its corresponding word:
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokenizer_src.tokens_to_string(tokens_src[idx])
+#+END_SRC
+'naturkatastrofer forfærdelige meget af ramt været medlemslandene af del en i
+borgerne har gengæld til ikke sig problem 2000 år store det se kan de som'
+
+This text is actually reversed, as can be seen when compared to the original
+text from the data-set:
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_src[idx]
+#+END_SRC
+'Som De kan se, indfandt det store "år 2000-problem" sig ikke. Til gengæld har
+borgerne i en del af medlemslandene været ramt af meget forfærdelige
+naturkatastrofer.'
+
+This is the sequence of integer-tokens for the corresponding text in the
+destination-language. Note how it is padded with zeros at the end
+(post-padding).
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokens_dest[idx]
+#+END_SRC
+array([   2,  404,   19,   43,   26,   20,  618,    1, 1451,    5, 9785,
+        174,    1,   81,    7,    9,  214,    4,   67, 2200,    9, 1596,
+          4,  892, 1762,    8, 1480,  107, 5494,    3,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0],
+      dtype=int32)
+
+We can reconstruct the original text by converting each integer-token back to
+its corresponding word:
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokenizer_dest.tokens_to_string(tokens_dest[idx])
+#+END_SRC
+'ssss although as you will have seen the failed to materialise still the people
+in a number of countries suffered a series of natural disasters that truly were
+dreadful eeee'
+
+Compare this to the original text from the data-set, which is almost identical
+except for punctuation marks and a few words such as "dreaded millennium bug".
+This is because we only use a vocabulary of the 10000 most frequent words in the
+data-set and those 3 words were apparently not used frequently enough to be
+included in the vocabulary, so they are merely skipped.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+data_dest[idx]
+#+END_SRC
+"ssss Although, as you will have seen, the dreaded 'millennium bug' failed to
+materialise, still the people in a number of countries suffered a series of
+natural disasters that truly were dreadful. eeee"
+
+** 训练模型
+*** Training Data
+Now that the data-set has been converted to sequences of integer-tokens that are
+padded and truncated and saved in numpy arrays, we can easily prepare the data
+for use in training the neural network.
+
+*** input of encoder
+The input to the encoder is merely the numpy array for the padded and truncated
+sequences of integer-tokens produced by the tokenizer:
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+encoder_input_data = tokens_src
+#+END_SRC
+
+*** input and output of decoder
+The input and output data for the decoder is identical,
+
+#+BEGIN_QUOTE
+except shifted one time-step.
+#+END_QUOTE
+
+We can use the same numpy array to save memory by slicing it, which
+merely creates different 'views' of the same data in memory.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_input_data = tokens_dest[:, :-1]
+decoder_input_data.shape
+#+END_SRC
+(1968800, 54)
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_output_data = tokens_dest[:, 1:]
+decoder_output_data.shape
+#+END_SRC
+(1968800, 54)
+
+For example, these token-sequences are identical except they are shifted one
+time-step.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 2
+#+END_SRC
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_input_data[idx]
+#+END_SRC
+array([   2,  404,   19,   43,   26,   20,  618,    1, 1451,    5, 9785,
+        174,    1,   81,    7,    9,  214,    4,   67, 2200,    9, 1596,
+          4,  892, 1762,    8, 1480,  107, 5494,    3,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0],
+      dtype=int32)
+
+      #+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_output_data[idx]
+      #+END_SRC
+array([ 404,   19,   43,   26,   20,  618,    1, 1451,    5, 9785,  174,
+          1,   81,    7,    9,  214,    4,   67, 2200,    9, 1596,    4,
+        892, 1762,    8, 1480,  107, 5494,    3,    0,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
+          0,    0,    0,    0,    0,    0,    0,    0,    0,    0],
+      dtype=int32)
+
+If we use the tokenizer to convert these sequences back into text, we see that
+they are identical except for the first word which is 'ssss' that marks the
+beginning of a text.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokenizer_dest.tokens_to_string(decoder_input_data[idx])
+#+END_SRC
+'ssss although as you will have seen the failed to materialise still the people
+in a number of countries suffered a series of natural disasters that truly were
+dreadful eeee'
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+tokenizer_dest.tokens_to_string(decoder_output_data[idx])
+#+END_SRC
+'although as you will have seen the failed to materialise still the people in a
+number of countries suffered a series of natural disasters that truly were
+dreadful eeee'
+
+* Create the Neural Network
+** Create the Encoder
+First we create the encoder-part of the neural network which maps a sequence of
+integer-tokens to a "thought vector". We will use the so-called functional API
+of Keras for this,
+
+#+BEGIN_QUOTE
+where we first create the objects for all the layers of the neural network and
+then we connect them later, this allows for more flexibility than the so-called
+sequential API in Keras, *which is useful when experimenting with more
+complicated architectures and ways of connecting the encoder and decoder*.
+#+END_QUOTE
+
+This is the input for the encoder which takes batches of integer-token
+sequences. The None indicates that the sequences can have arbitrary length.
+
+*** build input layer
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+encoder_input = Input(shape=(None, ), name='encoder_input')
+#+END_SRC
+This is the length of the vectors output by the embedding-layer, which maps
+integer-tokens to vectors of values roughly between -1 and 1, so that words that
+have similar semantic meanings are mapped to vectors that are similar. See
+Tutorial #20 for a more detailed explanation of this.
+
+*** build embedding layer
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+embedding_size = 128
+#+END_SRC
+This is the embedding-layer.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+encoder_embedding = Embedding(input_dim=num_words,
+                              output_dim=embedding_size,
+                              name='encoder_embedding')
+#+END_SRC
+
+*** build GRU
+This is the size of the internal states of the Gated Recurrent Units (GRU). The
+same size is used in both the encoder and decoder.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+state_size = 512
+#+END_SRC
+
+This creates the 3 GRU layers that will map from a sequence of embedding-vectors
+to a single "thought vector" which summarizes the contents of the input-text.
+Note that the last GRU-layer does not return a sequence.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+encoder_gru1 = GRU(state_size, name='encoder_gru1',
+                   return_sequences=True)
+encoder_gru2 = GRU(state_size, name='encoder_gru2',
+                   return_sequences=True)
+encoder_gru3 = GRU(state_size, name='encoder_gru3',
+                   return_sequences=False)
+#+END_SRC
+
+*** connnect them together: 注意链接方式
+    #+BEGIN_QUOTE
+    ~把 xxx 接到网络中(最后一层之后) = xxx(网络)~
+    #+END_QUOTE
+
+This helper-function connects all the layers of the encoder.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+def connect_encoder():
+    # Start the neural network with its input-layer.
+    net = encoder_input
+
+    # Connect the embedding-layer.
+    net = encoder_embedding(net)
+​
+    # Connect all the GRU-layers.
+    net = encoder_gru1(net)
+    net = encoder_gru2(net)
+    net = encoder_gru3(net)
+​
+    # This is the output of the encoder.
+    encoder_output = net
+
+    return encoder_output
+#+END_SRC
+
+Note how the encoder uses the normal output from its last GRU-layer as the
+"thought vector".
+
+#+BEGIN_QUOTE
+Research papers often use the *internal state of the encoder's last recurrent
+layer as the "thought vector"*. But this makes the implementation more
+complicated and is not necessary when using the GRU. But if you were using the
+LSTM instead then it is necessary to use the LSTM's internal states as the
+"thought vector" because it actually has two internal vectors, which we would
+need to initialize the two internal states of the decoder's LSTM units.
+#+END_QUOTE
+
+*** 获取模型
+We can now use this function to connect all the layers in the encoder so it can
+be connected to the decoder further below.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+encoder_output = connect_encoder()
+#+END_SRC
+WARNING:tensorflow:From
+/home/magnus/anaconda3/envs/tf-gpu/lib/python3.6/site-packages/tensorflow/python/keras/_impl/keras/backend.py:1456:
+calling reduce_sum (from tensorflow.python.ops.math_ops) with keep_dims is
+deprecated and will be removed in a future version. Instructions for updating:
+keep_dims is deprecated, use keepdims instead
+
+** Create the Decoder
+Create the decoder-part which maps the "thought vector" to a sequence of
+integer-tokens.
+
+*** build two input layers
+
+    - one input layer --- text like "ssss xxxxxxx eeee"
+    - one input layer --- "thought vector"
+
+The decoder takes two inputs. First it needs the "thought vector" produced by
+the encoder which summarizes the contents of the input-text.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_initial_state = Input(shape=(state_size,),
+                              name='decoder_initial_state')
+#+END_SRC
+The decoder also needs a sequence of integer-tokens as inputs. During training
+we will supply this with a full sequence of integer-tokens e.g. corresponding to
+the text "ssss once upon a time eeee".
+
+During inference when we are translating new input-texts, we will start by
+feeding a sequence with just one integer-token for "ssss" which marks the
+beginning of a text, and combined with the "thought vector" from the encoder,
+the decoder will hopefully be able to produce the correct next word e.g. "once".
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_input = Input(shape=(None, ), name='decoder_input')
+#+END_SRC
+
+*** build embedding layer
+This is the embedding-layer which converts integer-tokens to vectors of
+real-valued numbers roughly between -1 and 1. Note that we have different
+embedding-layers for the encoder and decoder because we have two different
+vocabularies and two different tokenizers for the source and destination
+languages.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_embedding = Embedding(input_dim=num_words,
+                              output_dim=embedding_size,
+                              name='decoder_embedding')
+#+END_SRC
+
+*** build GRU
+This creates the 3 GRU layers of the decoder. Note that they all return
+sequences because we ultimately want to output a sequence of integer-tokens that
+can be converted into a text-sequence.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_gru1 = GRU(state_size, name='decoder_gru1',
+                   return_sequences=True)
+decoder_gru2 = GRU(state_size, name='decoder_gru2',
+                   return_sequences=True)
+decoder_gru3 = GRU(state_size, name='decoder_gru3',
+                   return_sequences=True)
+#+END_SRC
+
+The GRU layers output a tensor with shape [batch_size, sequence_length,
+state_size], where each "word" is encoded as a vector of length state_size. We
+need to convert this into sequences of integer-tokens that can be interpreted as
+words from our vocabulary.
+
+One way of doing this is to convert the GRU output to a one-hot encoded array.
+It works but it is extremely wasteful, because for a vocabulary of e.g. 10000
+words we need a vector with 10000 elements, so we can select the index of the
+highest element to be the integer-token.
+
+*** define loss our own function
+    #+BEGIN_EXAMPLE
+    为什么说,这里直接用 linear 激活函数就会得到 one-hot encoding.
+    #+END_EXAMPLE
+
+Note that the activation-function is set to linear instead of softmax as we
+would normally use for one-hot encoded outputs, because there is apparently a
+bug in Keras so we need to make our own loss-function, as described in detail
+further below.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_dense = Dense(num_words,
+                      activation='linear',
+                      name='decoder_output')
+#+END_SRC
+
+The decoder is built using the functional API of Keras, which allows more
+flexibility in connecting the layers e.g. to route different inputs to the
+decoder.
+
+#+BEGIN_QUOTE
+This is useful because we have to connect the decoder directly to the encoder,
+but we will also connect the decoder to another input so we can run it
+separately.
+#+END_QUOTE
+
+*** connect them together
+This function connects all the layers of the decoder to some input of the
+initial-state values for the GRU layers.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+def connect_decoder(initial_state):
+    # Start the decoder-network with its input-layer.
+    net = decoder_input
+​
+    # Connect the embedding-layer.
+    net = decoder_embedding(net)
+
+    # Connect all the GRU-layers.
+    net = decoder_gru1(net, initial_state=initial_state)
+    net = decoder_gru2(net, initial_state=initial_state)
+    net = decoder_gru3(net, initial_state=initial_state)
+​
+    # Connect the final dense layer that converts to
+    # one-hot encoded arrays.
+    decoder_output = decoder_dense(net)
+
+    return decoder_output
+#+END_SRC
+
+** Connect and Create the Models
+We can now connect the encoder and decoder in different ways.
+
+*** model of encoder and decoder
+First we connect the encoder directly to the decoder so it is one whole model
+that can be trained end-to-end. This means the initial-state of the decoder's
+GRU units are set to the output of the encoder.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_output = connect_decoder(initial_state=encoder_output)
+#+END_SRC
+​
+*注意这里是如何衔接两个网络的 ===> 两个网络在一起叫做 Model*
+*单看 decoder 的话, 有点像之前看过的 "用前两个字预测第三个字" 的感觉*
+#+BEGIN_EXAMPLE
+                      INPUT OF MODEL
+
+                           |
+                           |
+      +--------------------+------------------+
+      |                                       |
+
+你好么, 我很好                          ssss how R U, I'm fine eeee
+     |                                |
+     v                                v
++-----------+                    +-----------+
+|           |                 +--|           |
++-----------+                 |  +-----------+
+     |                        |       |
+     v                        |       v
++-----------+                 |  +-----------+
+|           |                 +--|           |
++-----------+                 |  +-----------+
+           |                  |       |
+           v                  |       |
+           thought vector -->-+       |
+                                      v
+                                      how R U, I'm fine eeee
+                                      |
+                           +----------+
+                           |
+                           v
+
+                      OUTPUT OF MODEL
+
+#+END_EXAMPLE
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+model_train = Model(inputs=[encoder_input, decoder_input],
+                    outputs=[decoder_output])
+#+END_SRC
+
+*** model of encoder only
+Then we create a model for just the encoder alone. This is useful for mapping a
+sequence of integer-tokens to a "thought-vector" summarizing its contents.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+model_encoder = Model(inputs=[encoder_input],
+                      outputs=[encoder_output])
+#+END_SRC
+
+*** model of decoder only
+Then we create a model for just the decoder alone. This allows us to directly
+input the initial state for the decoder's GRU units.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_output = connect_decoder(initial_state=decoder_initial_state)
+#+END_SRC
+​
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+model_decoder = Model(inputs=[decoder_input, decoder_initial_state],
+                      outputs=[decoder_output])
+#+END_SRC
+
+Note that all these models use the same weights and variables of the encoder and
+decoder. We are merely changing how they are connected. So once the entire model
+has been trained, we can run the encoder and decoder models separately with the
+trained weights.
+
+*** Loss Function
+The output of the decoder is *a sequence of one-hot encoded arrays*. In order to
+train the decoder we need to supply the one-hot encoded arrays that we desire to
+see on the decoder's output, and then use a loss-function like *cross-entropy*
+to train the decoder to produce this desired output.
+
+However, our data-set contains integer-tokens instead of one-hot encoded arrays.
+Each one-hot encoded array has 10000 elements so it would be extremely wasteful
+to convert the entire data-set to one-hot encoded arrays.
+
+*** maybe a bug of keras
+A better way is to use a so-called *sparse cross-entropy loss-function*, which
+does the conversion internally from integers to one-hot encoded arrays.
+Unfortunately, there seems to be a bug in Keras when using this with Recurrent
+Neural Networks, so the following does not work:
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+# model_train.compile(optimizer=optimizer,
+#                     loss='sparse_categorical_crossentropy')
+#+END_SRC
+The decoder outputs a 3-rank tensor with shape [batch_size, sequence_length,
+num_words] which contains batches of sequences of one-hot encoded arrays of
+length num_words. We will compare this to a 2-rank tensor with shape
+[batch_size, sequence_length] containing sequences of integer-tokens.
+
+*** sparse cross entropy
+This comparison is done with a sparse-cross-entropy function directly from
+TensorFlow. There are several things to note here.
+
+1. Firstly, the loss-function calculates the softmax internally to improve
+   numerical stability - this is why we used a linear activation function in the
+   last dense-layer of the decoder-network above.
+
+2. Secondly, the loss-function from TensorFlow will output a 2-rank tensor of
+   shape ~[batch_size, sequence_length]~ given these inputs. But this must
+   ultimately be reduced to a single scalar-value whose gradient can be derived
+   by TensorFlow so it can be optimized using gradient descent.
+
+3. Keras supports some weighting of loss-values across the batch but the
+   semantics are unclear so to be sure that we calculate the loss-function
+   across the entire batch and across the entire sequences, we manually
+   calculate the loss average.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+def sparse_cross_entropy(y_true, y_pred):
+    """
+    Calculate the cross-entropy loss between y_true and y_pred.
+
+    y_true is a 2-rank tensor with the desired output.
+    The shape is [batch_size, sequence_length] and it
+    contains sequences of integer-tokens.
+​
+    y_pred is the decoder's output which is a 3-rank tensor
+    with shape [batch_size, sequence_length, num_words]
+    so that for each sequence in the batch there is a one-hot
+    encoded array of length num_words.
+    """
+​
+    # Calculate the loss. This outputs a
+    # 2-rank tensor of shape [batch_size, sequence_length]
+    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y_true,
+                                                          logits=y_pred)
+​
+    # Keras may reduce this across the first axis (the batch)
+    # but the semantics are unclear, so to be sure we use
+    # the loss across the entire 2-rank tensor, we reduce it
+    # to a single scalar with the mean function.
+    loss_mean = tf.reduce_mean(loss)
+​
+    return loss_mean
+#+END_SRC
+
+*** Compile the Training Model
+We have used the Adam optimizer in many of the previous tutorials, but it seems
+to diverge in some of these experiments with Recurrent Neural Networks. RMSprop
+seems to work much better for these.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+optimizer = RMSprop(lr=1e-3)
+#+END_SRC
+There seems to be another bug in Keras so it cannot automatically deduce the
+correct shape of the decoder's output data. We therefore need to manually create
+a placeholder variable for the decoder's output. The shape is set to (None,
+None) which means the batch can have an arbitrary number of sequences, which can
+have an arbitrary number of integer-tokens.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+decoder_target = tf.placeholder(dtype='int32', shape=(None, None))
+#+END_SRC
+We can now compile the model using our custom loss-function.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+model_train.compile(optimizer=optimizer,
+                    loss=sparse_cross_entropy,
+                    target_tensors=[decoder_target])
+#+END_SRC
+WARNING:tensorflow:From
+/home/magnus/anaconda3/envs/tf-gpu/lib/python3.6/site-packages/tensorflow/python/keras/_impl/keras/backend.py:1557:
+calling reduce_mean (from tensorflow.python.ops.math_ops) with keep_dims is
+deprecated and will be removed in a future version. Instructions for updating:
+keep_dims is deprecated, use keepdims instead
+
+** Callback Functions of Kearas
+During training we want to save checkpoints and log the progress to TensorBoard
+so we create the appropriate callbacks for Keras.
+
+*** CF: writing checkpoints
+This is the callback for writing checkpoints during training.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+path_checkpoint = '21_checkpoint.keras'
+callback_checkpoint = ModelCheckpoint(filepath=path_checkpoint,
+                                      monitor='val_loss',
+                                      verbose=1,
+                                      save_weights_only=True,
+                                      save_best_only=True)
+#+END_SRC
+
+*** CF: early stopping
+This is the callback for stopping the optimization when performance worsens on
+the validation-set.
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+callback_early_stopping = EarlyStopping(monitor='val_loss',
+                                        patience=3, verbose=1)
+#+END_SRC
+
+*** CF: use TensorBoard
+This is the callback for writing the TensorBoard log during training.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+callback_tensorboard = TensorBoard(log_dir='./21_logs/',
+                                   histogram_freq=0,
+                                   write_graph=False)
+
+#+END_SRC
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+callbacks = [callback_early_stopping,
+             callback_checkpoint,
+             callback_tensorboard]
+#+END_SRC
+
+*** Load Checkpoint
+You can reload the last saved checkpoint so you don't have to train the model
+every time you want to use it.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+try:
+    model_train.load_weights(path_checkpoint)
+except Exception as error:
+    print("Error trying to load checkpoint.")
+    print(error)
+#+END_SRC
+
+** 适配模型
+*** Train the Model
+We wrap the data in named dicts so we are sure the data is assigned correctly to
+the inputs and outputs of the model.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+x_data = \
+{
+    'encoder_input': encoder_input_data,
+    'decoder_input': decoder_input_data
+}
+#+END_SRC
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+y_data = \
+{
+    'decoder_output': decoder_output_data
+}
+#+END_SRC
+
+We want a validation-set of 10000 sequences but Keras needs this number as a
+fraction.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+validation_split = 10000 / len(encoder_input_data)
+validation_split
+#+END_SRC
+0.0050792360828931325
+
+Now we can train the model. One epoch of training took about 1 hour on a GTX
+1070 GPU. You probably need to run 10 epochs or more during training. After 10
+epochs the loss was about 1.10 on the training-set and about 1.15 on the
+validation-set.
+
+Note the strange batch-size of 640 (512 + 128) which was chosen because it kept
+the GPU running at nearly 100% while being within the memory limits of 8GB for
+this GPU.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+model_train.fit(x=x_data,
+                y=y_data,
+                batch_size=640,
+                epochs=10,
+                validation_split=validation_split,
+                callbacks=callbacks)
+#+END_SRC
+
+** 评测模型
+*** Translate Texts
+This function translates a text from the source-language to the
+destination-language and optionally prints a true translation.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+def translate(input_text, true_output_text=None):
+    """Translate a single text-string."""
+​
+    # Convert the input-text to integer-tokens.
+    # Note the sequence of tokens has to be reversed.
+    # Padding is probably not necessary.
+    input_tokens = tokenizer_src.text_to_tokens(text=input_text,
+                                                reverse=True,
+                                                padding=True)
+
+    # Get the output of the encoder's GRU which will be
+    # used as the initial state in the decoder's GRU.
+    # This could also have been the encoder's final state
+    # but that is really only necessary if the encoder
+    # and decoder use the LSTM instead of GRU because
+    # the LSTM has two internal states.
+    initial_state = model_encoder.predict(input_tokens)
+​
+    # Max number of tokens / words in the output sequence.
+    max_tokens = tokenizer_dest.max_tokens
+​
+    # Pre-allocate the 2-dim array used as input to the decoder.
+    # This holds just a single sequence of integer-tokens,
+    # but the decoder-model expects a batch of sequences.
+    shape = (1, max_tokens)
+    decoder_input_data = np.zeros(shape=shape, dtype=np.int)
+​
+    # The first input-token is the special start-token for 'ssss '.
+    token_int = token_start
+​
+    # Initialize an empty output-text.
+    output_text = ''
+​
+    # Initialize the number of tokens we have processed.
+    count_tokens = 0
+​
+    # While we haven't sampled the special end-token for ' eeee'
+    # and we haven't processed the max number of tokens.
+    while token_int != token_end and count_tokens < max_tokens:
+        # Update the input-sequence to the decoder
+        # with the last token that was sampled.
+        # In the first iteration this will set the
+        # first element to the start-token.
+        decoder_input_data[0, count_tokens] = token_int
+​
+        # Wrap the input-data in a dict for clarity and safety,
+        # so we are sure we input the data in the right order.
+        x_data = \
+        {
+            'decoder_initial_state': initial_state,
+            'decoder_input': decoder_input_data
+        }
+​
+        # Note that we input the entire sequence of tokens
+        # to the decoder. This wastes a lot of computation
+        # because we are only interested in the last input
+        # and output. We could modify the code to return
+        # the GRU-states when calling predict() and then
+        # feeding these GRU-states as well the next time
+        # we call predict(), but it would make the code
+        # much more complicated.
+​
+        # Input this data to the decoder and get the predicted output.
+        decoder_output = model_decoder.predict(x_data)
+​
+        # Get the last predicted token as a one-hot encoded array.
+        token_onehot = decoder_output[0, count_tokens, :]
+
+        # Convert to an integer-token.
+        token_int = np.argmax(token_onehot)
+​
+        # Lookup the word corresponding to this integer-token.
+        sampled_word = tokenizer_dest.token_to_word(token_int)
+​
+        # Append the word to the output-text.
+        output_text += " " + sampled_word
+​
+        # Increment the token-counter.
+        count_tokens += 1
+​
+    # Sequence of tokens output by the decoder.
+    output_tokens = decoder_input_data[0]
+
+    # Print the input-text.
+    print("Input text:")
+    print(input_text)
+    print()
+​
+    # Print the translated output-text.
+    print("Translated text:")
+    print(output_text)
+    print()
+​
+    # Optionally print the true translated text.
+    if true_output_text is not None:
+        print("True output text:")
+        print(true_output_text)
+        print()
+
+#+END_SRC
+
+*** Examples
+Translate a text from the training-data. This translation is quite good. Note
+how it is not identical to the translation from the training-data, but the
+actual meaning is similar.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 3
+translate(input_text=data_src[idx],
+          true_output_text=data_dest[idx])
+#+END_SRC
+
+Input text:
+De har udtrykt ønske om en debat om dette emne i løbet af mødeperioden.
+
+Translated text:
+you have expressed a wish for a debate on this matter during the part session
+eeee
+
+True output text: ssss You have requested a debate on this subject in the course
+of the next few days, during this part-session. eeee
+
+Here is another example which is also a reasonable translation, although it has
+incorrectly translated the natural disasters. Note "countries of the European
+Union" has instead been translated as "member states" which are synonyms in this
+context.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 4
+translate(input_text=data_src[idx],
+          true_output_text=data_dest[idx])
+#+END_SRC
+Input text: I mellemtiden ønsker jeg - som også en del kolleger har anmodet om -
+at vi iagttager et minuts stilhed til minde om ofrene for bl.a. stormene i de
+medlemslande, der blev ramt.
+
+Translated text: in the meantime i also asked for a minute's silence on the
+ memory of victims of the atrocities that have been committed in the member
+ states eeee
+
+True output text: ssss In the meantime, I should like to observe a minute' s
+silence, as a number of Members have requested, on behalf of all the victims
+concerned, particularly those of the terrible storms, in the various countries
+of the European Union. eeee
+
+In this example we join two texts from the training-set. The model first sends
+this combined text through the encoder, which produces a "thought-vector" that
+seems to summarize both texts reasonably well so the decoder can produce a
+reasonable translation.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 3
+translate(input_text=data_src[idx] + data_src[idx+1],
+          true_output_text=data_dest[idx] + data_dest[idx+1])
+#+END_SRC
+Input text: De har udtrykt ønske om en debat om dette emne i løbet af
+mødeperioden.I mellemtiden ønsker jeg - som også en del kolleger har anmodet
+om - at vi iagttager et minuts stilhed til minde om ofrene for bl.a. stormene i
+de medlemslande, der blev ramt.
+
+Translated text: you have expressed a wish for a vote on this question during
+ the vote on thursday and in the end i would also like to ask you to pay tribute
+ to the memory of a tragedy in the case of the victims of the various member
+ states eeee
+
+True output text: ssss You have requested a debate on this subject in the course
+of the next few days, during this part-session. eeeessss In the meantime, I
+should like to observe a minute' s silence, as a number of Members have
+requested, on behalf of all the victims concerned, particularly those of the
+terrible storms, in the various countries of the European Union. eeee
+
+If we reverse the order of these two texts then the meaning is not quite so
+clear for the latter text.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+idx = 3
+translate(input_text=data_src[idx+1] + data_src[idx],
+          true_output_text=data_dest[idx+1] + data_dest[idx])
+#+END_SRC
+Input text: I mellemtiden ønsker jeg - som også en del kolleger har anmodet om -
+at vi iagttager et minuts stilhed til minde om ofrene for bl.a. stormene i de
+medlemslande, der blev ramt.De har udtrykt ønske om en debat om dette emne i
+løbet af mødeperioden.
+
+Translated text: in the meantime i would also like to ask you to remember that
+ we have received a silence on the victims of the floods in the member states of
+ the european union which have been particularly sensitive to this debate in the
+ house eeee
+
+True output text: ssss In the meantime, I should like to observe a minute' s
+silence, as a number of Members have requested, on behalf of all the victims
+concerned, particularly those of the terrible storms, in the various countries
+of the European Union. eeeessss You have requested a debate on this subject in
+the course of the next few days, during this part-session. eeee
+
+This is an example I made up. It is a quite broken translation.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+translate(input_text="der var engang et land der hed Danmark",
+          true_output_text='Once there was a country named Denmark')
+#+END_SRC
+Input text:
+der var engang et land der hed Danmark
+
+Translated text: there was a country that denmark was once again eeee
+
+True output text: Once there was a country named Denmark
+
+This is another example I made up. This is a better translation even though it
+is perhaps a more complicated text.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+translate(input_text="Idag kan man læse i avisen at Danmark er blevet fornuftigt",
+          true_output_text="Today you can read in the newspaper that Denmark has become sensible.")
+#+END_SRC
+Input text: Idag kan man læse i avisen at Danmark er blevet fornuftigt
+
+Translated text: can you read in the newspapers that denmark has been sensible
+ eeee
+
+True output text: Today you can read in the newspaper that Denmark has become
+sensible.
+
+This is a text from a Danish song. It doesn't even make much sense in Danish.
+However the translation is probably so broken because several of the words are
+not in the vocabulary.
+
+#+BEGIN_SRC ipython :tangle yes :session :exports both :async t :results raw drawer
+translate(input_text="Hvem spæner ud af en butik og tygger de stærkeste bolcher?",
+          true_output_text="Who runs out of a shop and chews the strongest bon-bons?")
+#+END_SRC
+Input text: Hvem spæner ud af en butik og tygger de stærkeste bolcher?
+
+Translated text: who is by a and by the powerful eeee
+
+True output text: Who runs out of a shop and chews the strongest bon-bons?
+
+*** Conclusion
+This tutorial showed the basic idea of using two Recurrent Neural Networks in a
+so-called *encoder/decoder model* to do Machine Translation of human languages.
+It was demonstrated on the very large Europarl data-set from the European Union.
+
+The model could produce reasonable translations for some texts but not for
+others. It is possible that a better architecture for the neural network and
+more training epochs could improve performance. There are also more advanced
+models that are known to improve quality of the translations.
+
+However, it is important to note that these models do not really understand
+human language. The models have no knowledge of the actual meaning of the words.
+The models are merely very advanced function approximators that can map between
+sequences of integer-tokens.
+
+*** Exercises
+These are a few suggestions for exercises that may help improve your skills with
+TensorFlow. It is important to get hands-on experience with TensorFlow in order
+to learn how to use it properly.
+
+You may want to backup this Notebook before making any changes.
+
+#+BEGIN_QUOTE
+Train for more than 10 epochs. Does it improve the translations?
+Increase the size of the vocabulary. Does it improve the translations? Would it make sense to have different sizes for the vocabularies of the source and destination languages?
+Find another data-set and use it together with Europarl.
+Change the architectures of the neural network, for example change the state-size for the GRU layers, the number of GRU layers, the embedding-size, etc. Does it improve the translations?
+Use hyper-parameter optimization from Tutorial #19 to automatically find the best hyper-parameters.
+When translating texts, instead of using np.argmax() to sample the next integer-token, could you sample the decoder's output as if it was a probability distribution instead? Note that the decoder's output is not softmax-limited so you have to do that first to turn it into a probability-distribution.
+Can you generate multiple sequences by doing this sampling? Can you find a way to select the best of these different sequences?
+Disable the reversal of words for the source-language. Does it improve the translations?
+What is a Bi-Directional GRU and can you use it here?
+We use the output of the encoder's GRU as the initial state of the decoder's GRU. The research literature often uses an LSTM instead of the GRU, so they used the encoder's state instead of its output as the initial state of the decoder. Can you rewrite this code to use the encoder's state as the decoder's initial state? Is there a reason to do this, or is the encoder's output sufficient to use as the decoder's initial state?
+Is it possible to connect multiple encoders and decoders in a single neural network, so that you can train it on different languages and allow for direct translation e.g. from Danish to Polish, German and French?
+Explain to a friend how the program works.
+#+END_QUOTE
