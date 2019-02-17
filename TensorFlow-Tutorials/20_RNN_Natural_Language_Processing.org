@@ -1,9 +1,26 @@
+# -*- org-export-babel-evaluate: nil -*-
+#+PROPERTY: header-args :eval never-export
+#+PROPERTY: header-args:python :session cat 1.1
+#+PROPERTY: header-args:ipython :session cat 1.1
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="/home/yiddi/git_repos/YIDDI_org_export_theme/theme/org-nav-theme.css" >
+#+HTML_HEAD: <script src="/home/yiddi/git_repos/YIDDI_org_export_theme/theme/org-nav-theme.js"></script>
+#+HTML_HEAD: <script type="text/javascript">
+#+HTML_HEAD: <script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+#+OPTIONS: html-link-use-abs-url:nil html-postamble:nil html-preamble:t
+#+OPTIONS: H:3 num:nil ^:nil _:nil tags:not-in-toc
+#+AUTHOR: yiddishkop
+#+EMAIL: [[mailto:yiddishkop@163.com][yiddi's email]]
+#+TAGS: {PKGIMPT(i) DATAVIEW(v) DATAPREP(p) GRAPHBUILD(b) GRAPHCOMPT(c)} LINAGAPI(a) PROBAPI(b) MATHFORM(f) MLALGO(m)
 #+TITLE: TensorFlow Tutorial #20
+* 作业说明
+* 技术说明
+* 项目代码
+
 
 * Natural Language Processing
-The RNN architechture introduced here can be seen as a encoder.
-By encoder, we get a code, compare the code with label.
-This is how we train this encoder to do better.
+The RNN architechture introduced here can be seen as a encoder. By encoder, we
+get a code, compare the code with label. This is how we train this encoder to do
+better.
 ** 背景
 *** Introduction
 This tutorial is about a basic form of Natural Language Processing (NLP) called
@@ -1948,7 +1965,6 @@ _________________________________________________________________
  and say that all values above 0.5 are taken to be 1.0 and all values below 0.5
  are taken to be 0.0. This gives us a predicted "class" of either 0.0 or 1.0.
 
-
 *** 设置阈值获取确定结果
 #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer
  cls_pred = np.array([1.0 if p>0.5 else 0.0 for p in y_pred])
@@ -1967,7 +1983,6 @@ _________________________________________________________________
  incorrect = incorrect[0]
 #+END_SRC
  Of the 1000 texts used, how many were mis-classified?
-
 
 *** 展示预测错样本
 #+BEGIN_SRC ipython :session :exports both :async t :results raw drawer

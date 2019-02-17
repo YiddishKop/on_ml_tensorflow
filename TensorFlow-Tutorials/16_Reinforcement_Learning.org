@@ -100,12 +100,12 @@ zero because the agent is dead, so we set the Q-value for that state to zero.
 *** Simple Example
 The images below demonstrate how Q-values are updated in a backwards sweep
 through the game-states that have previously been visited. In this simple
-example we assume all Q-values have been initialized to zero. The agent gets a
+example we assume *all Q-values have been initialized to zero*. The agent gets a
 reward of 1 point in the right-most image. This reward is then propagated
 backwards to the previous game-states, so when we see similar game-states in the
 future, we know that the given actions resulted in that reward.
 
-The discounting is an exponentially decreasing function. This example uses a
+*The discounting is an exponentially decreasing function*. This example uses a
 discount-factor of 0.97 so the Q-value for the 3rd image is about
 0.885≃0.9740.885≃0.974 because it is 4 states prior to the state that actually
 received the reward. Similarly for the other states. This example only shows one
